@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+    backend:
+        build:
+            context: ./backend
+        ports:
+            - "8000:80" # Map host port 8000 to container port 80
+        volumes:
+            - ./backend/app:/app/app # Mount the app folder for live development
+            - ./backend/logs:/app/logs # Mount the logs folder
+            - ./backend/data:/app/data
+            - ./.git:/app/.git # Mount the .git folder from the project root
+        environment:
+            - EXAMPLE_ENV=your_value
