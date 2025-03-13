@@ -5,3 +5,12 @@ __pycache__/
 
 # C extensions
 *.so
+
+# logs
+logs
+
+# data and analytical files
+*.csv
+*.png
+*.html
+*.json

@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+yfinance
+lxml
+pandas
+requests
+scikit-learn
+plotly
