@@ -9,7 +9,8 @@ import plotly.io as pio
 
 from .logger import setup_logger
 from .data_preprocessing import preprocess_data
-from .data_downloader import download_data_yfinance, get_top_crypto_tickers, flatten_ticker_data
+from .data_downloader import download_data_yfinance, get_top_30_coins, flatten_ticker_data
+from .download_binance_data import download_binance_ohlcv
 from .grouping_analysis import perform_dimensionality_reduction, perform_clustering_analysis
 from .correlation_analysis import perform_correlation_analysis
 from .eda_analysis import perform_eda_analysis
@@ -56,7 +57,8 @@ async def download_ticker_data(
 @app.get("/download_all")
 async def download_all_data(
     period: str = Query("5y", description="Time period (e.g. '5y' for 5 years)"),
-    interval: str = Query("1d", description="Data interval (e.g. '1d' for daily)")
+    interval: str = Query("1d", description="Data interval (e.g. '1d' for daily)"),
+    datasource: str = Query("yfinance", description="yfinance or binance")
 ):
     """
     Download data for the top 30 crypto tickers, flatten each ticker's data into a single row,
@@ -64,21 +66,24 @@ async def download_all_data(
     
     The CSV file name is constructed as: yfinance_<interval>_<period>.csv
     """
-    tickers = get_top_crypto_tickers()
+    tickers = get_top_30_coins()
     if not tickers:
         raise HTTPException(status_code=404, detail="Could not retrieve top tickers.")
     
     flattened_data = {}
     for ticker in tickers:
         try:
-            df = download_data_yfinance(ticker, period=period, interval=interval)
-            if not df.empty:
-                # Flatten the data into a single row
-                flat_series = flatten_ticker_data(df)
-                flattened_data[ticker] = flat_series
-                app_logger.info(f"Downloaded and flattened data for {ticker}")
-            else:
-                app_logger.warning(f"No data found for {ticker}")
+            if datasource == "yfinance":
+                df = download_data_yfinance(ticker, period=period, interval=interval)
+                if not df.empty:
+                    # Flatten the data into a single row
+                    flat_series = flatten_ticker_data(df)
+                    flattened_data[ticker] = flat_series
+                    app_logger.info(f"Downloaded and flattened data for {ticker}")
+                else:
+                    app_logger.warning(f"No data found for {ticker}")
+            elif datasource == "binance":
+                df = download_binance_ohlcv(ticker, period, interval=interval)
         except Exception as e:
             app_logger.error(f"Error processing data for {ticker}: {e}")
     

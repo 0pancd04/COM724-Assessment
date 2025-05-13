@@ -1,7 +1,15 @@
+import datetime
+from binance.client import Client
 import requests
 import yfinance as yf
 import pandas as pd
 import logging
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from ../.env file
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+
 
 from .logger import setup_logger
 
@@ -17,26 +25,34 @@ if not logger.handlers:
 def download_data_yfinance(ticker: str, period: str = "5y", interval: str = "1d"):
     """
     Download historical data for a given crypto ticker from Yahoo Finance.
-    
+
     Args:
         ticker (str): The crypto ticker (e.g. "BTC-USD").
         period (str): Time period for data retrieval (default "5y").
         interval (str): Data interval (default "1d" for daily).
-        
+
     Returns:
         pd.DataFrame: DataFrame containing open, high, low, close, volume, etc.
     """
     try:
+        ticker = str(ticker).strip()
+        if not ticker or ticker.lower() == "nan":
+            logger.warning(f"Skipping invalid ticker: {ticker}")
+            return pd.DataFrame()
+
         logger.info(f"Downloading data for ticker: {ticker}, period: {period}, interval: {interval}")
         data = yf.download(ticker, period=period, interval=interval)
+
         if data.empty:
             logger.warning(f"No data found for ticker: {ticker}")
         else:
             logger.info(f"Successfully downloaded data for ticker: {ticker}")
+
         return data
+
     except Exception as e:
         logger.error(f"Error downloading data for ticker {ticker}: {e}", exc_info=True)
-        raise
+        return pd.DataFrame()
 
 
 def get_top_crypto_tickers(url: str = "https://finance.yahoo.com/markets/crypto/all/?start=0&count=50", top_n: int = 30):
@@ -52,29 +68,44 @@ def get_top_crypto_tickers(url: str = "https://finance.yahoo.com/markets/crypto/
     """
     try:
         logger.info(f"Fetching top crypto tickers from {url}")
-        # Use a custom user-agent to mimic a browser
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36"
         }
         response = requests.get(url, headers=headers)
-        response.raise_for_status()  # will raise an HTTPError for bad status
-        # Use the response content in pd.read_html
+        response.raise_for_status()
+
         tables = pd.read_html(response.text)
         df = tables[0]
+
         if "Symbol" in df.columns:
-            tickers = df["Symbol"].tolist()
+            raw_tickers = df["Symbol"]
         elif "Ticker" in df.columns:
-            tickers = df["Ticker"].tolist()
+            raw_tickers = df["Ticker"]
         else:
             msg = "Ticker column not found in the table"
             logger.error(msg)
             raise ValueError(msg)
-        logger.info(f"Found {len(tickers)} tickers, returning top {top_n}")
-        return tickers[:top_n]
+
+        # Clean and filter tickers
+        tickers = (
+            raw_tickers.dropna()
+            .astype(str)
+            .str.strip()
+            .unique()
+            .tolist()
+        )
+
+        # Filter only properly formatted crypto tickers like BTC-USD
+        valid_tickers = [t for t in tickers if re.fullmatch(r"[A-Z0-9]{2,10}-USD", t)]
+
+        logger.info(f"Filtered {len(valid_tickers)} valid tickers, returning top {top_n}")
+        return valid_tickers[:top_n]
+
     except Exception as e:
         logger.error(f"Error fetching tickers from {url}: {e}", exc_info=True)
         return []
+    
 
 def flatten_ticker_data(df: pd.DataFrame) -> pd.Series:
     """
@@ -113,3 +144,48 @@ def flatten_ticker_data(df: pd.DataFrame) -> pd.Series:
     except Exception as e:
         logger.error(f"Error flattening data: {e}", exc_info=True)
         raise
+
+def binance_data():
+    api_key = os.getenv("BINANCE_API")
+    api_secret = os.getenv("BINANCE_SECRET")
+
+    if not api_key or not api_secret:
+        raise ValueError("Binance API credentials not found in .env file.")
+
+    client = Client(api_key, api_secret)
+
+    # Define the symbol for BTC/USDT pair
+    symbol = 'BTCUSDT'
+
+    # Define custom start and end time
+    start_time = datetime.datetime(2024, 3, 15, 0, 0, 0)
+    end_time = datetime.datetime(2024, 6, 15, 0, 0, 0)
+
+    klines = client.get_historical_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, start_str=str(start_time), end_str=str(end_time))
+
+    # Convert the data into a pandas dataframe for easier manipulation
+    df_M = pd.DataFrame(klines, columns=['Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time', 'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 'Taker Buy Quote Asset Volume', 'Ignore'])
+
+
+    columns_to_convert = ['Open', 'High', 'Low', 'Close', 'Volume', 'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 'Taker Buy Quote Asset Volume']
+
+    for col in columns_to_convert:
+        df_M[col] = df_M[col].astype(float)
+
+    return df_M
+
+
+def get_top_30_coins():
+    url = "https://api.coingecko.com/api/v3/coins/markets"
+    params = {
+        "vs_currency": "usd",
+        "order": "market_cap_desc",
+        "per_page": 30,
+        "page": 1
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    # Extract coin symbols (e.g., BTC, ETH)
+    top_30_symbols = [coin["symbol"].upper() for coin in data]
+    return top_30_symbols

@@ -2,15 +2,19 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # C extensions
 *.so
 
 # logs
 logs
+fast_env
+.vscode
 
 # data and analytical files
 *.csv
 *.png
 *.html
 *.json
+*.env
