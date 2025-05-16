@@ -2,7 +2,7 @@ import os
 import datetime
 import pandas as pd
 from binance.client import Client
-from app.binance_client import binance_client  # This should be your configured client
+from .binance_client import binance_client  # This should be your configured client
 
 def download_binance_ohlcv(symbols, days=90, interval='1h', save_dir="data/binance_kline_data"):
     """

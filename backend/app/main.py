@@ -14,6 +14,25 @@ from .download_binance_data import download_binance_ohlcv
 from .grouping_analysis import perform_dimensionality_reduction, perform_clustering_analysis
 from .correlation_analysis import perform_correlation_analysis
 from .eda_analysis import perform_eda_analysis
+from .predictive_modeling import (
+    train_arima,
+    train_sarima,
+    train_random_forest,
+    train_xgboost,
+    train_lstm,
+    evaluate_forecasts,
+    compute_rsi, compute_macd
+)
+from .forecasting import (
+    load_model,
+    forecast_arima,
+    forecast_sarima,
+    forecast_random_forest,
+    forecast_xgboost,
+    forecast_lstm
+)
+from .signals import generate_signals, estimate_pnl, backtest_ticker
+from sklearn.model_selection import train_test_split
 
 LOG_DIR = "logs"
 
@@ -362,3 +381,162 @@ async def get_rolling_volatility_chart(ticker: str = Query(..., description="Tic
     """
     chart_path = f"data/eda/{ticker}/rolling_volatility_chart.html"
     return get_chart_html(chart_path)
+
+
+@app.post("/train/{ticker}")
+async def train_models(
+    ticker: str,
+    feature: str = Query("Close", description="Feature column"),
+    test_size: float = Query(0.2, description="Test split fraction")
+):
+    """Train ARIMA, SARIMA, RF, XGB, LSTM models for a given ticker"""
+    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv",
+                     index_col=0, parse_dates=True)
+    series = df[feature].dropna()
+    train, test = train_test_split(series, test_size=test_size, shuffle=False)
+
+    # 1) Fit each model
+    arima_m   = train_arima(ticker, train)
+    sarima_m  = train_sarima(ticker, train)
+    rf_m, rf_lag    = train_random_forest(ticker, train)
+    xgb_m, xgb_lag  = train_xgboost(ticker, train)
+    lstm_m, lstm_lag = train_lstm(ticker, train)
+
+    # 2) Forecast on test
+    preds = {
+        "ARIMA":        arima_m.forecast(steps=len(test)),
+        "SARIMA":       sarima_m.forecast(steps=len(test)),
+        "RandomForest": forecast_random_forest((rf_m, rf_lag), train, len(test)),
+        "XGBoost":      forecast_xgboost((xgb_m, xgb_lag), train, len(test)),
+        "LSTM":         forecast_lstm((lstm_m, lstm_lag), train, len(test)),
+    }
+
+    # 3) Evaluate
+    metrics = {
+        name: evaluate_forecasts(test, pred)
+        for name, pred in preds.items()
+    }
+
+    return JSONResponse(content={"message": "Models trained", "metrics": metrics})
+
+
+@app.get("/forecast/{ticker}")
+async def get_forecast(
+    ticker: str,
+    model_type: str = Query("arima", description="arima|sarima|rf|xgb|lstm"),
+    periods: int = Query(7, description="Number of periods to forecast")
+):
+    """Return forecast for next `periods` days"""
+    # load the requested model
+    pkl = load_model(ticker, model_type)
+    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv",
+                     index_col=0, parse_dates=True)
+    last_series = df["Close"]
+
+    # dispatch to the right forecaster
+    if model_type == "arima":
+        fc = forecast_arima(pkl, periods)
+    elif model_type == "sarima":
+        fc = forecast_sarima(pkl, periods)
+    elif model_type == "rf":
+        fc = forecast_random_forest(pkl, last_series, periods)
+    elif model_type == "xgb":
+        fc = forecast_xgboost(pkl, last_series, periods)
+    elif model_type == "lstm":
+        fc = forecast_lstm(pkl, last_series, periods)
+    else:
+        raise HTTPException(400, "Unknown model_type")
+
+    return JSONResponse(content={
+        "ticker": ticker,
+        "model": model_type,
+        "forecast": fc.to_dict()
+    })
+
+
+@app.get("/signals/{ticker}")
+async def get_signals(
+    ticker: str,
+    model_type: str = Query("arima", description="arima|sarima|rf|xgb|lstm"),
+    periods: int = Query(7, description="Forecast horizon"),
+    threshold: float = Query(0.01, description="Threshold for signal generation")
+):
+    """Generate buy/sell signals and PnL based on forecast"""
+    # get forecast series
+    fc_resp = await get_forecast(ticker, model_type, periods)
+    fc_dict = fc_resp.body.get("forecast")
+    fc_series = pd.Series(fc_dict).sort_index()
+    # load historical Close
+    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv",
+                     index_col=0, parse_dates=True)
+    prices = df["Close"].append(fc_series)
+
+    signals_df = generate_signals(fc_series, threshold)
+    pnl = estimate_pnl(prices, signals_df["signal"])
+
+    return JSONResponse(content={
+        "signals": signals_df["signal"].to_dict(),
+        "pnl": pnl.fillna(0).to_dict()
+    })
+    
+
+@app.get("/indicators/{ticker}")
+async def get_indicators(
+    ticker: str,
+    window_rsi: int = Query(14),
+    fast: int = Query(12),
+    slow: int = Query(26),
+    signal: int = Query(9)
+):
+    "Retrieve RSI and MACD for a ticker"
+    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv", index_col=0, parse_dates=True)
+    prices = df['Close']
+    rsi = compute_rsi(prices, window_rsi)
+    macd = compute_macd(prices, fast, slow, signal)
+    return JSONResponse(content={
+        'rsi': rsi.dropna().to_dict(),
+        'macd': macd.dropna().to_dict()
+    })
+
+@app.get("/forecast_outputs/{ticker}")
+async def forecast_outputs(
+    ticker: str,
+    model_type: str = Query('arima', description='Model type'),
+    short_days: int = Query(1),
+    short_weeks: int = Query(7),
+    medium_month: int = Query(30),
+    medium_quarter: int = Query(90)
+):
+    "Returns multiple horizons with confidence intervals and past accuracy"
+    # load and forecast for each horizon
+    horizons = {
+        'short_day': short_days,
+        'short_week': short_weeks,
+        'medium_month': medium_month,
+        'medium_quarter': medium_quarter
+    }
+    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv", index_col=0, parse_dates=True)
+    series = df['Close']
+    pkl = load_model(ticker, model_type)
+    outputs = {}
+    for name, days in horizons.items():
+        fc = globals()[f'forecast_{model_type}'](pkl, days) if 'forecast_' + model_type in globals() else None
+        outputs[name] = fc.to_dict()
+    # accuracy: use evaluate on last short_window days
+    # user can call /train to get full metrics
+    return JSONResponse(content={'forecasts': outputs})
+
+@app.get("/backtest/{ticker}")
+async def backtest(
+    ticker: str,
+    model_type: str = Query('arima'),
+    periods: int = Query(7),
+    threshold: float = Query(0.01)
+):
+    "Run backtest with signals, indicators, and performance"
+    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv", index_col=0, parse_dates=True)
+    prices = df['Close']
+    pkl = load_model(ticker, model_type)
+    forecast_df = globals()[f'forecast_{model_type}'](pkl, periods)
+    result = backtest_ticker(prices, forecast_df['forecast'], threshold)
+    return JSONResponse(content=result)
