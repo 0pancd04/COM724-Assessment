@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Query
@@ -474,13 +475,11 @@ async def get_forecast(
     model_type: str = Query("arima", description="arima|sarima|rf|xgb|lstm"),
     periods: int = Query(7, description="Number of periods to forecast")
 ):
-    """Return forecast for next `periods` days"""
-    # load the requested model
+    """Return forecast for next `periods` days starting from tomorrow"""
     pkl = load_model(ticker, model_type)
     df_ticker   = unflatten_ticker_data(ticker, "data/preprocessed_yfinance_1d_5y.csv")
     last_series = df_ticker["Close"]
 
-    # dispatch to the right forecaster
     if model_type == "arima":
         fc = forecast_arima(pkl, periods)
     elif model_type == "sarima":
@@ -494,16 +493,21 @@ async def get_forecast(
     else:
         raise HTTPException(400, "Unknown model_type")
 
-    # convert the index to ISO‐format strings, then emit an index‐oriented dict
+    # regenerate the index from tomorrow for `periods` days
+    start_date = datetime.utcnow().date() + timedelta(days=1)
+    new_idx = pd.date_range(start=start_date, periods=periods, freq="D")
+    fc.index = new_idx
+
     fc_str = fc.copy()
-    fc_str.index = fc_str.index.astype(str)               # e.g. "2025-05-17 00:00:00"
+    fc_str.index = fc.index.astype(str)
     forecast_payload = fc_str.to_dict(orient="index")
 
-    return JSONResponse(content={
+    return JSONResponse({
         "ticker": ticker,
         "model": model_type,
         "forecast": forecast_payload
     })
+
 
 
 
@@ -514,13 +518,13 @@ async def get_signals(
     periods: int = Query(7, description="Forecast horizon"),
     threshold: float = Query(0.01, description="Threshold for signal generation")
 ):
-    """Generate buy/sell signals and PnL based on forecast"""
-    # 1. Reconstruct time series
+    """Generate buy/sell signals and PnL for the next `periods` days starting tomorrow"""
+    # 1) load historical
     df_ticker   = unflatten_ticker_data(ticker, "data/preprocessed_yfinance_1d_5y.csv")
     last_series = df_ticker["Close"]
-
-    # 2. Load model & produce forecast DataFrame
     pkl = load_model(ticker, model_type)
+
+    # 2) forecast
     if model_type == "arima":
         fc_df = forecast_arima(pkl, periods)
     elif model_type == "sarima":
@@ -534,24 +538,31 @@ async def get_signals(
     else:
         raise HTTPException(400, "Unknown model_type")
 
-    # 3. Extract the point forecast series and stringify the index
+    # 3) override index to tomorrow forward
+    start_date = datetime.utcnow().date() + timedelta(days=1)
+    new_idx = pd.date_range(start=start_date, periods=periods, freq="D")
+    fc_df.index = new_idx
+
+    # 4) extract point forecasts (keep DatetimeIndex)
     if "forecast" in fc_df.columns:
         series_fc = fc_df["forecast"].copy()
     else:
-        # single-column case
         series_fc = fc_df.iloc[:, 0].copy()
-    series_fc.index = series_fc.index.astype(str)
 
-    # 4. Generate signals & PnL
+    # 5) generate signals and PnL
     signals_df = generate_signals(series_fc, threshold)
-    # Combine historical + forecast for PnL
     all_prices = pd.concat([last_series, series_fc])
-    pnl = estimate_pnl(all_prices, signals_df["signal"])
+    pnl_series = estimate_pnl(all_prices, signals_df["signal"])
 
-    # 5. Return JSON-safe dicts
-    return JSONResponse(content={
-        "signals": signals_df["signal"].to_dict(),
-        "pnl": pnl.fillna(0).to_dict()
+    # 6) stringify for JSON output
+    signals_out = signals_df["signal"].copy()
+    signals_out.index = signals_out.index.astype(str)
+    pnl_out = pnl_series.copy().fillna(0)
+    pnl_out.index = pnl_out.index.astype(str)
+
+    return JSONResponse({
+        "signals": signals_out.to_dict(),
+        "pnl":     pnl_out.to_dict()
     })
 
     
