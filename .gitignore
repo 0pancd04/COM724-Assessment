@@ -16,7 +16,6 @@ fast_env
 *.csv
 *.png
 *.html
-*.json
 *.env
 *.7z
 *.pkl
