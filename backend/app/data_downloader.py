@@ -12,8 +12,10 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 
 from .logger import setup_logger
-
-logger = setup_logger("data_downloader_log", "data_downloader_log.log")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+logger = setup_logger("data_downloader_log", os.path.join(LOG_DIR, "data_downloader_log.log") )
 
 # If no handlers are present, add a default console handler
 if not logger.handlers:
@@ -180,7 +182,7 @@ def get_top_30_coins():
     params = {
         "vs_currency": "usd",
         "order": "market_cap_desc",
-        "per_page": 30,
+        "per_page": 100,
         "page": 1
     }
     response = requests.get(url, params=params)

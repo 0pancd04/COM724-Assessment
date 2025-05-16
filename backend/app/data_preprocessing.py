@@ -3,7 +3,12 @@ from sklearn.preprocessing import StandardScaler
 import os
 from .logger import setup_logger
 
-logger = setup_logger("data_preprocessing", "data_preprocessing.log")
+from .logger import setup_logger
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger = setup_logger("data_preprocessing", os.path.join(LOG_DIR, "data_preprocessing.log"))
 
 def preprocess_data(file_path: str, max_days: int = 365, output_file: str = None) -> (pd.DataFrame, dict):
     """

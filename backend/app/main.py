@@ -2,8 +2,7 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import pandas as pd
 import plotly.io as pio
 
@@ -21,7 +20,8 @@ from .predictive_modeling import (
     train_xgboost,
     train_lstm,
     evaluate_forecasts,
-    compute_rsi, compute_macd
+    compute_rsi,
+    compute_macd
 )
 from .forecasting import (
     load_model,
@@ -34,19 +34,37 @@ from .forecasting import (
 from .signals import generate_signals, estimate_pnl, backtest_ticker
 from sklearn.model_selection import train_test_split
 
-LOG_DIR = "logs"
+# --- Paths and Logging ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+app_logger = setup_logger("app_logger", os.path.join(LOG_DIR, "app.log"))
 
-app_logger = setup_logger("app_logger", "app.log")
 
-# Optionally, capture uvicorn server logs as well
+# Uvicorn logger
 uvicorn_logger = logging.getLogger("uvicorn")
-uvicorn_handler = RotatingFileHandler(os.path.join(LOG_DIR, "uvicorn.log"), maxBytes=5 * 1024 * 1024, backupCount=3)
+uvicorn_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, "uvicorn.log"), maxBytes=5 * 1024 * 1024, backupCount=3
+)
 uvicorn_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 uvicorn_handler.setFormatter(uvicorn_formatter)
 uvicorn_logger.addHandler(uvicorn_handler)
 
-# --- FastAPI Application ---
+# --- FastAPI App ---
 app = FastAPI()
+
+@app.on_event("startup")
+def clear_logs():
+    """Remove old log files on startup."""
+    for fname in os.listdir(LOG_DIR):
+        file_path = os.path.join(LOG_DIR, fname)
+        if os.path.isfile(file_path):
+            try:
+                os.remove(file_path)
+            except PermissionError:
+                pass
+    app_logger.info(f"Cleared logs in {LOG_DIR}")
+
 
 @app.get("/")
 async def read_root():
@@ -75,57 +93,79 @@ async def download_ticker_data(
 
 @app.get("/download_all")
 async def download_all_data(
-    period: str = Query("5y", description="Time period (e.g. '5y' for 5 years)"),
+    period: str = Query("90d", description="For yfinance: '5y'; for Binance: days as '90d'"),
     interval: str = Query("1d", description="Data interval (e.g. '1d' for daily)"),
-    datasource: str = Query("yfinance", description="yfinance or binance")
+    datasource: str = Query("yfinance", description="'yfinance' or 'binance'")
 ):
     """
-    Download data for the top 30 crypto tickers, flatten each ticker's data into a single row,
-    and store the complete dataset in a CSV file under the 'data' folder.
-    
-    The CSV file name is constructed as: yfinance_<interval>_<period>.csv
+    Download and flatten data for top tickers from the selected datasource.
+    For 'binance', period must be number of days as string, e.g. '90d'.
     """
-    tickers = get_top_30_coins()
-    if not tickers:
-        raise HTTPException(status_code=404, detail="Could not retrieve top tickers.")
-    
-    flattened_data = {}
-    for ticker in tickers:
-        try:
-            if datasource == "yfinance":
-                df = download_data_yfinance(ticker, period=period, interval=interval)
-                if not df.empty:
-                    # Flatten the data into a single row
-                    flat_series = flatten_ticker_data(df)
-                    flattened_data[ticker] = flat_series
-                    app_logger.info(f"Downloaded and flattened data for {ticker}")
+    try:
+        """
+        Download and flatten data for top tickers from the selected datasource.
+        Stops once 30 tickers have been successfully downloaded & flattened.
+        """
+        tickers = get_top_30_coins()
+        if not tickers:
+            raise HTTPException(404, "Could not retrieve top tickers.")
+        
+        flattened_data = {}
+        for ticker in tickers:
+            # Stop as soon as we have 30 valid tickers
+            if len(flattened_data) >= 30:
+                break
+
+            try:
+                if datasource == "yfinance":
+                    df = download_data_yfinance(ticker, period=period, interval=interval)
+                    if df.empty:
+                        app_logger.warning(f"YFinance empty for {ticker}, skipping")
+                        continue
+                    flat = flatten_ticker_data(df)
+                
+                elif datasource == "binance":
+                    try:
+                        days = int(period.rstrip("d"))
+                    except:
+                        days = 90
+                    df = download_binance_ohlcv([ticker], days=days, interval=interval)
+                    if df is None or df.empty:
+                        app_logger.warning(f"Binance empty for {ticker}, skipping")
+                        continue
+                    df = df.set_index("Open Time")[["Close"]]
+                    df.index.name = "Date"
+                    flat = flatten_ticker_data(df)
+                
                 else:
-                    app_logger.warning(f"No data found for {ticker}")
-            elif datasource == "binance":
-                df = download_binance_ohlcv(ticker, period, interval=interval)
-        except Exception as e:
-            app_logger.error(f"Error processing data for {ticker}: {e}")
-    
-    if not flattened_data:
-        raise HTTPException(status_code=500, detail="No data was downloaded.")
-    
-    # Combine all ticker series into a DataFrame (each row represents a ticker)
-    combined_df = pd.DataFrame.from_dict(flattened_data, orient="index")
-    
-    # Ensure the data directory exists
-    data_dir = "data"
-    if not os.path.exists(data_dir):
-        os.makedirs(data_dir)
-    
-    # Construct file name: source + interval + period
-    file_name = f"yfinance_{interval}_{period}.csv"
-    file_path = os.path.join(data_dir, file_name)
-    
-    # Save the combined DataFrame to CSV
-    combined_df.to_csv(file_path, index=True)
-    app_logger.info(f"Saved combined data for {len(flattened_data)} tickers to {file_path}")
-    
-    return JSONResponse(content={"message": "Data downloaded and stored", "file": file_name})
+                    raise HTTPException(400, "Invalid datasource.")
+                
+                flattened_data[ticker] = flat
+                app_logger.info(f"Flattened data for {ticker} ({len(flattened_data)}/30)")
+            
+            except Exception as e:
+                app_logger.error(f"Error with {ticker}: {e}", exc_info=True)
+                # skip this one, continue to next
+
+        if len(flattened_data) == 0:
+            raise HTTPException(500, "No tickers could be downloaded/flattened.")
+        
+        # Combine & save
+        combined_df = pd.DataFrame.from_dict(flattened_data, orient="index")
+        data_dir = os.path.join(BASE_DIR, "..", "..", "data")
+        os.makedirs(data_dir, exist_ok=True)
+        filename = f"{datasource}_{interval}_{period}.csv"
+        combined_df.to_csv(os.path.join(data_dir, filename))
+        app_logger.info(f"Saved {len(flattened_data)} tickers to {filename}")
+
+        return JSONResponse({"message": "Data downloaded and stored", "file": filename})
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        app_logger.exception(f"Unexpected error in download_all_data: {e}")
+        raise HTTPException(status_code=500, detail="Server error during data download.")
+
 
 
 @app.get("/preprocess_data")
