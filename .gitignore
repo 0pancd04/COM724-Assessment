@@ -18,3 +18,5 @@ fast_env
 *.html
 *.json
 *.env
+*.7z
+*.pkl

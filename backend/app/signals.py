@@ -18,7 +18,7 @@ def estimate_pnl(prices: pd.Series, signals: pd.Series) -> pd.Series:
     position = 0
     entry_price = 0.0
     for date, signal in signals.items():
-        price = prices.get(date, np.nan)
+        price = prices.get(pd.to_datetime(date)) if isinstance(date, str) else prices.get(date)
         if signal == 'BUY' and position == 0:
             position = 1
             entry_price = price
@@ -30,16 +30,31 @@ def estimate_pnl(prices: pd.Series, signals: pd.Series) -> pd.Series:
 # Backtest including technical indicators
 
 def backtest_ticker(prices: pd.Series, forecast: pd.Series, threshold: float):
-    # generate signals
-    signals_df = generate_signals(forecast, threshold)['signal']
-    # compute indicators
-    rsi = compute_rsi(prices)
-    macd_df = compute_macd(prices)
-    # backtest returns
-    perf = backtest_signals(prices, signals_df)
+    # 1) Generate signals DataFrame
+    signals_df = generate_signals(forecast, threshold)
+    signals_orig = signals_df['signal']
+
+    # 2) Compute performance using original timestamp index
+    perf = backtest_signals(prices, signals_orig)
+
+    # 3) Stringify and export signals
+    signals_series = signals_orig.copy()
+    signals_series.index = signals_series.index.astype(str)
+    signals_dict = signals_series.to_dict()
+
+    # 4) Compute RSI and stringify
+    rsi = compute_rsi(prices).dropna()
+    rsi.index = rsi.index.astype(str)
+    rsi_dict = rsi.to_dict()
+
+    # 5) Compute MACD and stringify
+    macd_df = compute_macd(prices).dropna()
+    macd_df.index = macd_df.index.astype(str)
+    macd_dict = macd_df.to_dict(orient='index')
+
     return {
-        'signals': signals_df.to_dict(),
-        'rsi': rsi.dropna().to_dict(),
-        'macd': macd_df.dropna().to_dict(),
+        'signals': signals_dict,
+        'rsi': rsi_dict,
+        'macd': macd_dict,
         'performance': perf
     }

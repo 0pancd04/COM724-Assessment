@@ -1,6 +1,7 @@
 import os
 import logging
 from logging.handlers import RotatingFileHandler
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 import pandas as pd
@@ -12,7 +13,7 @@ from .data_downloader import download_data_yfinance, get_top_30_coins, flatten_t
 from .download_binance_data import download_binance_ohlcv
 from .grouping_analysis import perform_dimensionality_reduction, perform_clustering_analysis
 from .correlation_analysis import perform_correlation_analysis
-from .eda_analysis import perform_eda_analysis
+from .eda_analysis import perform_eda_analysis, unflatten_ticker_data
 from .predictive_modeling import (
     train_arima,
     train_sarima,
@@ -52,6 +53,14 @@ uvicorn_logger.addHandler(uvicorn_handler)
 
 # --- FastAPI App ---
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins= ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
 def clear_logs():
@@ -430,9 +439,8 @@ async def train_models(
     test_size: float = Query(0.2, description="Test split fraction")
 ):
     """Train ARIMA, SARIMA, RF, XGB, LSTM models for a given ticker"""
-    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv",
-                     index_col=0, parse_dates=True)
-    series = df[feature].dropna()
+    df_ticker = unflatten_ticker_data(ticker, preprocessed_file="data/preprocessed_yfinance_1d_5y.csv")
+    series    = df_ticker[feature].dropna()
     train, test = train_test_split(series, test_size=test_size, shuffle=False)
 
     # 1) Fit each model
@@ -469,9 +477,8 @@ async def get_forecast(
     """Return forecast for next `periods` days"""
     # load the requested model
     pkl = load_model(ticker, model_type)
-    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv",
-                     index_col=0, parse_dates=True)
-    last_series = df["Close"]
+    df_ticker   = unflatten_ticker_data(ticker, "data/preprocessed_yfinance_1d_5y.csv")
+    last_series = df_ticker["Close"]
 
     # dispatch to the right forecaster
     if model_type == "arima":
@@ -487,11 +494,17 @@ async def get_forecast(
     else:
         raise HTTPException(400, "Unknown model_type")
 
+    # convert the index to ISO‐format strings, then emit an index‐oriented dict
+    fc_str = fc.copy()
+    fc_str.index = fc_str.index.astype(str)               # e.g. "2025-05-17 00:00:00"
+    forecast_payload = fc_str.to_dict(orient="index")
+
     return JSONResponse(content={
         "ticker": ticker,
         "model": model_type,
-        "forecast": fc.to_dict()
+        "forecast": forecast_payload
     })
+
 
 
 @app.get("/signals/{ticker}")
@@ -502,22 +515,45 @@ async def get_signals(
     threshold: float = Query(0.01, description="Threshold for signal generation")
 ):
     """Generate buy/sell signals and PnL based on forecast"""
-    # get forecast series
-    fc_resp = await get_forecast(ticker, model_type, periods)
-    fc_dict = fc_resp.body.get("forecast")
-    fc_series = pd.Series(fc_dict).sort_index()
-    # load historical Close
-    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv",
-                     index_col=0, parse_dates=True)
-    prices = df["Close"].append(fc_series)
+    # 1. Reconstruct time series
+    df_ticker   = unflatten_ticker_data(ticker, "data/preprocessed_yfinance_1d_5y.csv")
+    last_series = df_ticker["Close"]
 
-    signals_df = generate_signals(fc_series, threshold)
-    pnl = estimate_pnl(prices, signals_df["signal"])
+    # 2. Load model & produce forecast DataFrame
+    pkl = load_model(ticker, model_type)
+    if model_type == "arima":
+        fc_df = forecast_arima(pkl, periods)
+    elif model_type == "sarima":
+        fc_df = forecast_sarima(pkl, periods)
+    elif model_type == "rf":
+        fc_df = forecast_random_forest(pkl, last_series, periods)
+    elif model_type == "xgb":
+        fc_df = forecast_xgboost(pkl, last_series, periods)
+    elif model_type == "lstm":
+        fc_df = forecast_lstm(pkl, last_series, periods)
+    else:
+        raise HTTPException(400, "Unknown model_type")
 
+    # 3. Extract the point forecast series and stringify the index
+    if "forecast" in fc_df.columns:
+        series_fc = fc_df["forecast"].copy()
+    else:
+        # single-column case
+        series_fc = fc_df.iloc[:, 0].copy()
+    series_fc.index = series_fc.index.astype(str)
+
+    # 4. Generate signals & PnL
+    signals_df = generate_signals(series_fc, threshold)
+    # Combine historical + forecast for PnL
+    all_prices = pd.concat([last_series, series_fc])
+    pnl = estimate_pnl(all_prices, signals_df["signal"])
+
+    # 5. Return JSON-safe dicts
     return JSONResponse(content={
         "signals": signals_df["signal"].to_dict(),
         "pnl": pnl.fillna(0).to_dict()
     })
+
     
 
 @app.get("/indicators/{ticker}")
@@ -528,14 +564,24 @@ async def get_indicators(
     slow: int = Query(26),
     signal: int = Query(9)
 ):
-    "Retrieve RSI and MACD for a ticker"
-    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv", index_col=0, parse_dates=True)
-    prices = df['Close']
-    rsi = compute_rsi(prices, window_rsi)
-    macd = compute_macd(prices, fast, slow, signal)
+    """Retrieve RSI and MACD for a ticker"""
+    # Reconstruct time series
+    df_ticker = unflatten_ticker_data(ticker, "data/preprocessed_yfinance_1d_5y.csv")
+    prices = df_ticker['Close']
+
+    # Compute RSI and stringify index
+    rsi_series = compute_rsi(prices, window_rsi).dropna()
+    rsi_series.index = rsi_series.index.astype(str)
+    rsi_dict = rsi_series.to_dict()
+
+    # Compute MACD and stringify index
+    macd_df = compute_macd(prices, fast, slow, signal).dropna()
+    macd_df.index = macd_df.index.astype(str)
+    macd_dict = macd_df.to_dict(orient='index')
+
     return JSONResponse(content={
-        'rsi': rsi.dropna().to_dict(),
-        'macd': macd.dropna().to_dict()
+        'rsi': rsi_dict,
+        'macd': macd_dict
     })
 
 @app.get("/forecast_outputs/{ticker}")
@@ -555,13 +601,21 @@ async def forecast_outputs(
         'medium_month': medium_month,
         'medium_quarter': medium_quarter
     }
-    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv", index_col=0, parse_dates=True)
+    df = unflatten_ticker_data(ticker, "data/preprocessed_yfinance_1d_5y.csv")
     series = df['Close']
     pkl = load_model(ticker, model_type)
     outputs = {}
     for name, days in horizons.items():
-        fc = globals()[f'forecast_{model_type}'](pkl, days) if 'forecast_' + model_type in globals() else None
-        outputs[name] = fc.to_dict()
+        # 1) generate the raw forecast DataFrame
+        fc = globals()[f'forecast_{model_type}'](pkl, days)
+
+        # 2) make a copy and stringify the index
+        fc_str = fc.copy()
+        fc_str.index = fc_str.index.astype(str)
+
+        # 3) emit an orient="index" dict so each timestamp-string maps to its row dict
+        outputs[name] = fc_str.to_dict(orient="index")
+
     # accuracy: use evaluate on last short_window days
     # user can call /train to get full metrics
     return JSONResponse(content={'forecasts': outputs})
@@ -574,7 +628,7 @@ async def backtest(
     threshold: float = Query(0.01)
 ):
     "Run backtest with signals, indicators, and performance"
-    df = pd.read_csv(f"data/preprocessed_yfinance_1d_5y.csv", index_col=0, parse_dates=True)
+    df = unflatten_ticker_data(ticker, "data/preprocessed_yfinance_1d_5y.csv")
     prices = df['Close']
     pkl = load_model(ticker, model_type)
     forecast_df = globals()[f'forecast_{model_type}'](pkl, periods)

@@ -20,10 +20,37 @@ def ensure_model_dir():
 
 
 def evaluate_forecasts(actual: pd.Series, predicted: pd.Series):
-    rmse = np.sqrt(mean_squared_error(actual, predicted))
-    mae = mean_absolute_error(actual, predicted)
-    mape = np.mean(np.abs((actual - predicted) / actual)) * 100
-    return {"RMSE": rmse, "MAE": mae, "MAPE": mape}
+    """
+    Compute RMSE, MAE, and MAPE, handling divide-by-zero and sanitizing NaN/Inf values.
+    """
+    # Convert to numeric arrays
+    actual_arr = np.array(actual, dtype=float)
+    pred_arr   = np.array(predicted, dtype=float)
+
+    # RMSE and MAE
+    mse  = mean_squared_error(actual_arr, pred_arr)
+    rmse = np.sqrt(mse)
+    mae  = mean_absolute_error(actual_arr, pred_arr)
+
+    # MAPE (avoid division by zero)
+    mask_nonzero = actual_arr != 0
+    if np.any(mask_nonzero):
+        mape_val = np.mean(np.abs((actual_arr[mask_nonzero] - pred_arr[mask_nonzero]) / actual_arr[mask_nonzero])) * 100
+    else:
+        mape_val = None
+
+    # Helper to sanitize JSON
+    def sanitize(x):
+        if x is None or np.isnan(x) or np.isinf(x):
+            return None
+        return float(x)
+
+    return {
+        "RMSE": sanitize(rmse),
+        "MAE":  sanitize(mae),
+        "MAPE": sanitize(mape_val)
+    }
+
 
 
 def train_arima(ticker: str, series: pd.Series, order=(5,1,0)):
@@ -128,7 +155,7 @@ def backtest_signals(prices: pd.Series, signals: pd.Series) -> dict:
     returns = []
     position = 0
     entry_price = 0.0
-    for date, sig in signals.iteritems():
+    for date, sig in signals.items():
         price = prices.get(date)
         if sig == "BUY" and position == 0:
             position = 1
