@@ -634,3 +634,26 @@ async def backtest(
     forecast_df = globals()[f'forecast_{model_type}'](pkl, periods)
     result = backtest_ticker(prices, forecast_df['forecast'], threshold)
     return JSONResponse(content=result)
+
+
+MODEL_DIR = "models"  # make sure this matches wherever you’re saving .pkl files
+
+@app.get("/model_status/{ticker}")
+async def model_status(ticker: str):
+    """
+    Check which models already exist for the given ticker.
+    Returns a JSON object like:
+      {
+        "arima": true,
+        "sarima": false,
+        "rf": true,
+        "xgb": false,
+        "lstm": true
+      }
+    """
+    types = ["arima", "sarima", "rf", "xgb", "lstm"]
+    status = {
+        t: os.path.exists(os.path.join(MODEL_DIR, f"{ticker}_{t}.pkl"))
+        for t in types
+    }
+    return JSONResponse(content=status)
