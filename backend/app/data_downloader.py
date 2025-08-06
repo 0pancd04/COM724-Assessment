@@ -6,6 +6,7 @@ import pandas as pd
 import logging
 from dotenv import load_dotenv
 import os
+import re
 
 # Load environment variables from ../.env file
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -47,8 +48,16 @@ def download_data_yfinance(ticker: str, period: str = "5y", interval: str = "1d"
 
         if data.empty:
             logger.warning(f"No data found for ticker: {ticker}")
+            return pd.DataFrame()
         else:
-            logger.info(f"Successfully downloaded data for ticker: {ticker}")
+            logger.info(f"Successfully downloaded data for ticker: {ticker}, shape: {data.shape}, columns: {list(data.columns)}")
+            
+            # Handle multi-level columns immediately after download
+            if hasattr(data.columns, 'nlevels') and data.columns.nlevels > 1:
+                logger.info(f"[download_data_yfinance] Multi-level columns detected, flattening...")
+                if data.columns.nlevels == 2:
+                    data.columns = data.columns.droplevel(0)  # Remove ticker level
+                logger.info(f"[download_data_yfinance] Flattened columns: {list(data.columns)}")
 
         return data
 
@@ -148,13 +157,12 @@ def flatten_ticker_data(df: pd.DataFrame) -> pd.Series:
         raise
 
 def binance_data():
-    api_key = os.getenv("BINANCE_API")
-    api_secret = os.getenv("BINANCE_SECRET")
-
-    if not api_key or not api_secret:
+    from .binance_client import binance_client
+    
+    if binance_client is None:
         raise ValueError("Binance API credentials not found in .env file.")
 
-    client = Client(api_key, api_secret)
+    client = binance_client
 
     # Define the symbol for BTC/USDT pair
     symbol = 'BTCUSDT'
@@ -188,6 +196,6 @@ def get_top_30_coins():
     response = requests.get(url, params=params)
     data = response.json()
 
-    # Extract coin symbols (e.g., BTC, ETH)
-    top_30_symbols = [coin["symbol"].upper() for coin in data]
+    # Extract coin symbols and append USDT for Binance compatibility
+    top_30_symbols = [f"{coin['symbol'].upper()}USDT" for coin in data]
     return top_30_symbols

@@ -24,7 +24,11 @@ def download_binance_ohlcv(symbols, days=90, interval='1h', save_dir="data/binan
 
     # Binance expects the symbol to be like 'BTCUSDT'
     for coin in symbols:
-        symbol = f"{coin.upper()}USDT"
+        # Check if symbol already ends with USDT
+        if coin.upper().endswith('USDT'):
+            symbol = coin.upper()
+        else:
+            symbol = f"{coin.upper()}USDT"
         print(f"Downloading {symbol} from {start_time} to {end_time} at {interval} interval")
 
         try:

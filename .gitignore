@@ -19,3 +19,13 @@ fast_env
 *.env
 *.7z
 *.pkl
+
+/backend/data
+/backend/app/logs/*
+/backend/app/logs/app.log
+/backend/app/logs/pipeline_orchestrator.log
+/backend/app/logs/pipeline_orchestrator.log
+/backend/app/data/*
+/docs
+pipeline-full-response.json
+/api_response_data/*

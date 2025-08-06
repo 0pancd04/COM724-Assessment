@@ -85,4 +85,8 @@ def perform_correlation_analysis(
         logger.info(f"Saved correlation chart HTML to {html_file}")
         report["chart_file_html"] = html_file
 
+    # Store to database if using database mode
+    if use_database and selected_tickers:
+        store_correlation_to_db(corr_df, report, selected_tickers, feature, fig)
+    
     return corr_df, report, fig

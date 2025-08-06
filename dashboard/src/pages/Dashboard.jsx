@@ -295,7 +295,7 @@ export default function Dashboard() {
                     <select
                         value={ticker}
                         onChange={(e) => setTicker(e.target.value)}
-                        className="p-2 border rounded"
+                        className="p-2 glass-dropdown"
                     >
                         <option value="" disabled>
                             Select ticker
@@ -314,7 +314,7 @@ export default function Dashboard() {
                     <select
                         value={interval}
                         onChange={(e) => setInterval(e.target.value)}
-                        className="p-2 border rounded"
+                        className="p-2 glass-dropdown"
                     >
                         {["1m", "5m", "15m", "1h", "4h", "1d"].map((iv) => (
                             <option key={iv} value={iv}>
@@ -326,7 +326,7 @@ export default function Dashboard() {
                     <select
                         value={modelType}
                         onChange={(e) => setModelType(e.target.value)}
-                        className="p-2 border rounded"
+                        className="p-2 glass-dropdown"
                     >
                         {["arima", "sarima", "rf", "xgb", "lstm"].map((m) => (
                             <option key={m} value={m}>
@@ -339,7 +339,7 @@ export default function Dashboard() {
                     <select
                         value={horizon}
                         onChange={(e) => setHorizon(parseInt(e.target.value))}
-                        className="p-2 border rounded"
+                        className="p-2 glass-dropdown"
                     >
                         <option value={7}>Next Week</option>
                         <option value={30}>Next Month</option>

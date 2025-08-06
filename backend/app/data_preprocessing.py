@@ -38,7 +38,48 @@ def preprocess_data(file_path: str, max_days: int = 365, output_file: str = None
     report = {}
 
     logger.info(f"Loading data from {file_path}")
-    df = pd.read_csv(file_path, index_col=0)
+    
+    # Check if file exists and is not empty
+    if not os.path.exists(file_path):
+        logger.error(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path}")
+    
+    if os.path.getsize(file_path) == 0:
+        logger.warning(f"File is empty: {file_path}")
+        # Return empty DataFrame with consistent structure
+        empty_df = pd.DataFrame()
+        report = {
+            "initial_shape": (0, 0),
+            "initial_columns": [],
+            "final_shape": (0, 0),
+            "warning": "Input file was empty"
+        }
+        return empty_df, report
+    
+    try:
+        df = pd.read_csv(file_path, index_col=0)
+    except pd.errors.EmptyDataError:
+        logger.warning(f"No data found in file: {file_path}")
+        empty_df = pd.DataFrame()
+        report = {
+            "initial_shape": (0, 0),
+            "initial_columns": [],
+            "final_shape": (0, 0),
+            "warning": "No data found in file"
+        }
+        return empty_df, report
+    
+    # Check if DataFrame is empty after loading
+    if df.empty:
+        logger.warning(f"Loaded DataFrame is empty from: {file_path}")
+        report = {
+            "initial_shape": df.shape,
+            "initial_columns": list(df.columns),
+            "final_shape": (0, 0),
+            "warning": "DataFrame is empty after loading"
+        }
+        return df, report
+    
     report["initial_shape"] = df.shape
     report["initial_columns"] = list(df.columns)
 
@@ -105,11 +146,31 @@ def preprocess_data(file_path: str, max_days: int = 365, output_file: str = None
     rows_after_drop = df_features.shape[0]
     report["rows_dropped"] = rows_before_drop - rows_after_drop
 
+    # Check if we have any data left after cleaning
+    if df_features.empty:
+        logger.warning("No data remaining after cleaning missing values")
+        report["final_shape"] = (0, 0)
+        report["warning"] = "All data was removed during cleaning"
+        return pd.DataFrame(), report
+
+    # Check if we have sufficient data for scaling (at least 2 rows)
+    if df_features.shape[0] < 2:
+        logger.warning(f"Insufficient data for scaling: only {df_features.shape[0]} rows remaining")
+        report["final_shape"] = df_features.shape
+        report["warning"] = "Insufficient data for proper scaling"
+        return df_features, report
+
     logger.info("Scaling the data with StandardScaler")
-    scaler = StandardScaler()
-    scaled_array = scaler.fit_transform(df_features)
-    df_scaled = pd.DataFrame(scaled_array, index=df_features.index, columns=df_features.columns)
-    report["final_shape"] = df_scaled.shape
+    try:
+        scaler = StandardScaler()
+        scaled_array = scaler.fit_transform(df_features)
+        df_scaled = pd.DataFrame(scaled_array, index=df_features.index, columns=df_features.columns)
+        report["final_shape"] = df_scaled.shape
+    except Exception as e:
+        logger.error(f"Error during scaling: {e}")
+        report["final_shape"] = df_features.shape
+        report["scaling_error"] = str(e)
+        return df_features, report
 
     logger.info("Data preprocessing completed successfully")
 

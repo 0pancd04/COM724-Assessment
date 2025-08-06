@@ -3,58 +3,146 @@ import os
 import logging
 import plotly.express as px
 import plotly.graph_objects as go
-from .logger import setup_logger
+from .logger import setup_enhanced_logger
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
-logger = setup_logger("eda_analysis", os.path.join(LOG_DIR, "eda_analysis.log"))
+logger = setup_enhanced_logger("eda_analysis", os.path.join(LOG_DIR, "eda_analysis.log"))
 
-def unflatten_ticker_data(ticker: str, preprocessed_file: str) -> pd.DataFrame:
+def unflatten_ticker_data(ticker: str, preprocessed_file: str = None, use_database: bool = True, source: str = 'yfinance') -> pd.DataFrame:
     """
     Reads the preprocessed CSV file and extracts the row for the given ticker,
     then unflattens it into a DataFrame with Date as index and columns: Open, High, Low, Close, Volume.
-    Assumes column names are in the format "YYYY-MM-DD_<Metric>".
+    For database mode, gets OHLCV data directly.
     """
-    # Load with explicit UTF-8 encoding
-    df = pd.read_csv(preprocessed_file, index_col=0, encoding='utf-8')
-    if ticker not in df.index:
-        raise ValueError(f"Ticker {ticker} not found in preprocessed data.")
-    row = df.loc[ticker]
-    data = {}
-    for col, value in row.items():
+    logger.info(f"Getting ticker data for {ticker}, use_database: {use_database}, source: {source}", "unflatten_ticker_data")
+    
+    if use_database:
+        from .database import crypto_db
         try:
-            date_str, metric = col.rsplit("_", 1)
-        except Exception:
-            continue
-        if date_str not in data:
-            data[date_str] = {}
-        data[date_str][metric] = value
-    unflattened_df = pd.DataFrame.from_dict(data, orient='index')
-    unflattened_df.index = pd.to_datetime(unflattened_df.index)
-    unflattened_df.sort_index(inplace=True)
-    return unflattened_df
+            # Get data directly from database using OHLCV method
+            df = crypto_db.get_ohlcv_data(ticker, source=source)
+            if df.empty:
+                logger.warning(f"No OHLCV data found for {ticker} with source {source}, trying without source", "unflatten_ticker_data")
+                # Try without source specification
+                df = crypto_db.get_ohlcv_data(ticker)
+                if df.empty:
+                    raise ValueError(f"No data found for {ticker} in database")
+            
+            logger.info(f"Successfully retrieved {len(df)} records for {ticker} from database", "unflatten_ticker_data")
+            
+            # Ensure proper datetime index
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
+            
+            # Ensure we have the expected columns
+            expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            missing_cols = [col for col in expected_cols if col not in df.columns]
+            if missing_cols:
+                logger.warning(f"Missing expected columns for {ticker}: {missing_cols}. Available: {list(df.columns)}", "unflatten_ticker_data")
+            
+            return df.sort_index()
+            
+        except Exception as e:
+            logger.error(f"Error fetching data from database for {ticker}: {e}", "unflatten_ticker_data")
+            raise ValueError(f"No data found for {ticker} in database: {str(e)}")
+    else:
+        # File-based processing (legacy)
+        if not preprocessed_file:
+            raise ValueError("preprocessed_file required when use_database=False")
+        
+        logger.info(f"Loading preprocessed file: {preprocessed_file}", "unflatten_ticker_data")
+        
+        # Load with explicit UTF-8 encoding
+        df = pd.read_csv(preprocessed_file, index_col=0, encoding='utf-8')
+        if ticker not in df.index:
+            raise ValueError(f"Ticker {ticker} not found in preprocessed data.")
+        row = df.loc[ticker]
+        
+        # Unflatten the data
+        data = {}
+        for col, value in row.items():
+            try:
+                date_str, metric = col.rsplit("_", 1)
+            except Exception:
+                continue
+            if date_str not in data:
+                data[date_str] = {}
+            data[date_str][metric] = value
+        
+        unflattened_df = pd.DataFrame.from_dict(data, orient='index')
+        unflattened_df.index = pd.to_datetime(unflattened_df.index)
+        unflattened_df.sort_index(inplace=True)
+        return unflattened_df
 
-def perform_eda_analysis(ticker: str, preprocessed_file: str, output_dir: str = None) -> (dict, dict):
+def perform_eda_analysis(ticker: str, preprocessed_file: str = None, output_dir: str = None, use_database: bool = True, source: str = 'yfinance') -> (dict, dict):
     """
-    Performs EDA for the given ticker:
-      - Reconstructs the time series for Open, High, Low, Close, and Volume.
-      - Generates interactive charts and saves them in JSON/HTML formats with UTF-8.
+    Performs EDA for the given ticker.
+    
+    Args:
+        ticker: Cryptocurrency ticker symbol
+        preprocessed_file: Optional path to preprocessed data file
+        output_dir: Optional directory for saving charts
+        use_database: Whether to use database (default True)
+        source: Data source (default 'yfinance')
+        
     Returns:
-      report (dict): Summary including number of records and file paths.
-      charts (dict): File paths for each saved chart.
+        tuple: (report dict, charts dict)
     """
+    logger.info(f"Starting EDA analysis for ticker: {ticker}, source: {source}, use_database: {use_database}", "perform_eda_analysis")
+    
+    from .unified_data_handler import unified_handler
+    from .database import crypto_db
+    
+    def serialize_timestamp(obj):
+        """Helper to serialize timestamps"""
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        return str(obj)
+    
+    def check_existing_eda(ticker: str, analysis_type: str):
+        """Check if EDA results exist in database - placeholder function"""
+        # For now, always return None to force fresh analysis
+        return None
+    
+    def store_eda_to_db(ticker: str, analysis_type: str, data: dict, chart_type: str, fig):
+        """Store EDA results to database - placeholder function"""
+        try:
+            from .analysis_storage import analysis_storage
+            analysis_storage.store_eda_results(
+                ticker=ticker,
+                analysis_type=analysis_type,
+                data=data,
+                chart_type=chart_type,
+                chart_html=fig.to_html(full_html=False) if fig else None
+            )
+        except Exception as e:
+            logger.warning(f"Could not store EDA to database: {e}")
+            pass
     report = {}
     charts = {}
     if output_dir is None:
         output_dir = os.path.join(BASE_DIR, "..", "..","data", "eda", ticker)
     os.makedirs(output_dir, exist_ok=True)
     
+    # Check if EDA already exists in database
+    if use_database:
+        logger.info(f"Checking for existing EDA results for {ticker}", "perform_eda_analysis")
+        existing = check_existing_eda(ticker, 'full_eda')
+        if existing:
+            logger.info(f"Using existing EDA for {ticker} from database", "perform_eda_analysis")
+            return existing['data'].get('report', {}), existing['data'].get('charts', {})
+        else:
+            logger.info(f"No existing EDA found for {ticker}, generating new analysis", "perform_eda_analysis")
+    
     # Reconstruct the time series data
+    logger.info(f"Getting data for ticker: {ticker}", "perform_eda_analysis")
     try:
-        df_ticker = unflatten_ticker_data(ticker, preprocessed_file)
+        df_ticker = unflatten_ticker_data(ticker, preprocessed_file, use_database, source)
+        logger.info(f"Successfully loaded data for {ticker}: {df_ticker.shape[0]} records, columns: {list(df_ticker.columns)}", "perform_eda_analysis")
     except Exception as e:
-        logger.error(f"Error unflattening data for {ticker}: {e}")
+        logger.error(f"Error getting data for {ticker}: {e}", "perform_eda_analysis")
         raise
 
     report["num_records"] = df_ticker.shape[0]
@@ -100,6 +188,12 @@ def perform_eda_analysis(ticker: str, preprocessed_file: str, output_dir: str = 
             f.write(fig_hist.to_html(full_html=True))
         charts["histograms_json"] = hist_json
         charts["histograms_html"] = hist_html
+        
+        # Store to database if 'use_database' is in locals/vars
+        if 'use_database' in locals() and use_database:
+            store_eda_to_db(ticker, 'distribution', 
+                          {'metrics': list(df_ticker.columns)},
+                          'histograms', fig_hist)
     except Exception as e:
         logger.error(f"EDA Histograms for {ticker}: {e}")
         raise
@@ -201,5 +295,16 @@ def perform_eda_analysis(ticker: str, preprocessed_file: str, output_dir: str = 
     except Exception as e:
         logger.error(f"EDA Volatility for {ticker}: {e}")
         raise
+    
+    logger.info(f"EDA analysis completed for {ticker}. Generated {len(charts)} charts", "perform_eda_analysis")
+    logger.info(f"Charts generated: {list(charts.keys())}", "perform_eda_analysis")
+    
+    # Store all EDA results to database if using database
+    if use_database:
+        try:
+            logger.info(f"Storing EDA results to database for {ticker}", "perform_eda_analysis")
+            store_eda_to_db(ticker, 'full_eda', {'report': report, 'charts': charts}, 'complete_eda', None)
+        except Exception as e:
+            logger.warning(f"Failed to store EDA results to database: {e}", "perform_eda_analysis")
     
     return report, charts

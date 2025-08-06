@@ -3,8 +3,9 @@ FROM python:3.11-bullseye
 
 WORKDIR /app
 
-# Install system and venv dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
@@ -15,24 +16,23 @@ RUN apt-get update && apt-get install -y \
     libxslt1-dev \
     zlib1g-dev \
     curl \
-    python3-venv \
-    && apt-get clean
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Create and activate a virtual environment
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Install uv
+RUN pip install uv
 
-# Upgrade pip within the venv
-RUN pip install --upgrade pip
-
-# Copy and install Python dependencies inside the venv
+# Copy requirements and install dependencies with uv
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv venv && uv pip install -r requirements.txt
 
 # Copy application code
 COPY . /app
 
+# Create necessary directories
+RUN mkdir -p /app/data /app/logs /app/models
+
 EXPOSE 80
 
-# Launch the application using Uvicorn from the venv
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80", "--reload"]
+# Launch the application using Uvicorn from the virtual environment
+CMD [".venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
