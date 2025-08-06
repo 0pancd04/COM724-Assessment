@@ -17,8 +17,8 @@ export const API_ENDPOINTS = {
   // Analysis endpoints
   EDA: `${API_BASE_URL}/eda`,
   EDA_CHARTS: `${API_BASE_URL}/eda/charts`,
-  CORRELATION: `${API_BASE_URL}/correlation`,
-  CLUSTERING: `${API_BASE_URL}/clustering`,
+  CORRELATION: `${API_BASE_URL}/correlation_analysis`,
+  CLUSTERING: `${API_BASE_URL}/clustering_analysis`,
   ANALYSIS: `${API_BASE_URL}/analysis`,
   
   // Model endpoints

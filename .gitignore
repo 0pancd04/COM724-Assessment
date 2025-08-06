@@ -29,3 +29,5 @@ fast_env
 /docs
 pipeline-full-response.json
 /api_response_data/*
+/backend/unit-tests
+/data

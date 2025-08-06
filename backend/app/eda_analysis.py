@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import os
 import logging
 import plotly.express as px
@@ -9,6 +10,105 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 logger = setup_enhanced_logger("eda_analysis", os.path.join(LOG_DIR, "eda_analysis.log"))
+
+def sanitize_float(value):
+    """Convert non-JSON-compliant float values to None"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if np.isnan(value) or np.isinf(value):
+            return None
+        return float(value)
+    return value
+
+def generate_statistical_summary(df: pd.DataFrame) -> dict:
+    """
+    Generate comprehensive statistical summary for the DataFrame
+    
+    Args:
+        df: DataFrame containing OHLCV data
+        
+    Returns:
+        Dictionary containing statistical summaries
+    """
+    try:
+        logger.info(f"[generate_statistical_summary] Generating statistical summary for DataFrame with shape {df.shape}")
+        
+        # Get only numeric columns for statistics
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        numeric_df = df[numeric_cols] if numeric_cols else df
+        
+        report = {
+            "num_records": len(df),
+            "date_start": str(df.index.min()) if hasattr(df.index, 'min') else None,
+            "date_end": str(df.index.max()) if hasattr(df.index, 'max') else None,
+            "days": len(df)
+        }
+        
+        # Basic statistics for each numeric column
+        for col in numeric_cols:
+            if col in df.columns:
+                col_data = df[col].dropna()
+                if len(col_data) > 0:
+                    # Format volume with 2 decimal places, others with appropriate precision
+                    if col.lower() == 'volume':
+                        report[f"{col.lower()}_mean"] = sanitize_float(round(float(col_data.mean()), 2))
+                        report[f"{col.lower()}_median"] = sanitize_float(round(float(col_data.median()), 2))
+                        report[f"{col.lower()}_std"] = sanitize_float(round(float(col_data.std()), 2))
+                        report[f"{col.lower()}_min"] = sanitize_float(round(float(col_data.min()), 2))
+                        report[f"{col.lower()}_max"] = sanitize_float(round(float(col_data.max()), 2))
+                    else:
+                        report[f"{col.lower()}_mean"] = sanitize_float(round(float(col_data.mean()), 4))
+                        report[f"{col.lower()}_median"] = sanitize_float(round(float(col_data.median()), 4))
+                        report[f"{col.lower()}_std"] = sanitize_float(round(float(col_data.std()), 4))
+                        report[f"{col.lower()}_min"] = sanitize_float(round(float(col_data.min()), 4))
+                        report[f"{col.lower()}_max"] = sanitize_float(round(float(col_data.max()), 4))
+        
+        # Price-specific statistics if Close column exists
+        if 'Close' in df.columns:
+            close_data = df['Close'].dropna()
+            if len(close_data) > 1:
+                # Daily returns
+                returns = close_data.pct_change().dropna()
+                if len(returns) > 0:
+                    report["daily_return_mean"] = sanitize_float(round(float(returns.mean() * 100), 4))  # Percentage
+                    report["daily_return_std"] = sanitize_float(round(float(returns.std() * 100), 4))   # Percentage
+                    report["volatility_annualized"] = sanitize_float(round(float(returns.std() * np.sqrt(252) * 100), 2))  # Annualized %
+                
+                # Price change
+                try:
+                    price_change = close_data.iloc[-1] - close_data.iloc[0]
+                    report["price_change"] = sanitize_float(round(float(price_change), 4))
+                    if close_data.iloc[0] != 0:
+                        price_change_pct = (close_data.iloc[-1] - close_data.iloc[0]) / close_data.iloc[0] * 100
+                        report["price_change_pct"] = sanitize_float(round(float(price_change_pct), 2))
+                    else:
+                        report["price_change_pct"] = 0.0
+                except (IndexError, ZeroDivisionError) as e:
+                    logger.warning(f"Could not calculate price change: {e}")
+                    report["price_change"] = None
+                    report["price_change_pct"] = None
+        
+        # Volume statistics if Volume column exists
+        if 'Volume' in df.columns:
+            volume_data = df['Volume'].dropna()
+            if len(volume_data) > 0:
+                report["avg_daily_volume"] = sanitize_float(round(float(volume_data.mean()), 2))
+                report["total_volume"] = sanitize_float(round(float(volume_data.sum()), 2))
+        
+        # Missing data information
+        try:
+            missing_pct = df.isnull().sum().sum() / (len(df) * len(df.columns)) * 100
+            report["missing_data_pct"] = sanitize_float(round(float(missing_pct), 2))
+        except ZeroDivisionError:
+            report["missing_data_pct"] = None
+        
+        logger.info(f"[generate_statistical_summary] Generated {len(report)} statistical metrics")
+        return report
+        
+    except Exception as e:
+        logger.error(f"[generate_statistical_summary] Error generating statistical summary: {e}")
+        return {"num_records": len(df) if df is not None else 0, "error": str(e)}
 
 def unflatten_ticker_data(ticker: str, preprocessed_file: str = None, use_database: bool = True, source: str = 'yfinance') -> pd.DataFrame:
     """
@@ -145,15 +245,21 @@ def perform_eda_analysis(ticker: str, preprocessed_file: str = None, output_dir:
         logger.error(f"Error getting data for {ticker}: {e}", "perform_eda_analysis")
         raise
 
-    report["num_records"] = df_ticker.shape[0]
+    # Generate comprehensive statistical summary
+    report = generate_statistical_summary(df_ticker)
     
     # 1. Temporal Line Chart
     try:
         fig_line = go.Figure()
         for metric in ["Open", "High", "Low", "Close", "Volume"]:
             if metric in df_ticker.columns:
+                # Format Volume data to 2 decimal places
+                y_data = df_ticker[metric]
+                if metric == "Volume":
+                    y_data = y_data.round(2)
+                
                 fig_line.add_trace(go.Scatter(
-                    x=df_ticker.index, y=df_ticker[metric], mode="lines", name=metric
+                    x=df_ticker.index, y=y_data, mode="lines", name=metric
                 ))
         fig_line.update_layout(
             title=f"Temporal Trends for {ticker}", xaxis_title="Date", yaxis_title="Scaled Value"
@@ -172,14 +278,30 @@ def perform_eda_analysis(ticker: str, preprocessed_file: str = None, output_dir:
     
     # 2. Histograms
     try:
-        df_melt = df_ticker.reset_index().melt(
-            id_vars='index', var_name="Metric", value_name="Value"
-        )
-        fig_hist = px.histogram(
-            df_melt, x="Value", facet_col="Metric",
-            title=f"Distribution Histograms for {ticker}",
-            labels={"Value": "Scaled Value", "Metric": "Metric"}
-        )
+        df_reset = df_ticker.reset_index()
+        # Get the name of the index column (could be 'index', 'timestamp', etc.)
+        index_col_name = df_reset.columns[0]  # First column is always the reset index
+        logger.info(f"[perform_eda_analysis] Reset DataFrame columns: {list(df_reset.columns)}, using index column: {index_col_name}")
+        
+        # Only include numeric columns for histograms
+        numeric_cols = df_reset.select_dtypes(include=[np.number]).columns.tolist()
+        value_vars = [col for col in numeric_cols if col != index_col_name]
+        logger.info(f"[perform_eda_analysis] Numeric columns for histograms: {value_vars}")
+        
+        if not value_vars:
+            logger.warning(f"[perform_eda_analysis] No numeric columns found for histogram generation")
+            # Create empty histogram
+            fig_hist = go.Figure()
+            fig_hist.update_layout(title=f"Distribution Histograms for {ticker} - No numeric data available")
+        else:
+            df_melt = df_reset.melt(
+                id_vars=index_col_name, value_vars=value_vars, var_name="Metric", value_name="Value"
+            )
+            fig_hist = px.histogram(
+                df_melt, x="Value", facet_col="Metric",
+                title=f"Distribution Histograms for {ticker}",
+                labels={"Value": "Scaled Value", "Metric": "Metric"}
+            )
         hist_json = os.path.join(output_dir, "histograms.json")
         hist_html = os.path.join(output_dir, "histograms.html")
         with open(hist_json, "w", encoding='utf-8') as f:
@@ -200,11 +322,17 @@ def perform_eda_analysis(ticker: str, preprocessed_file: str = None, output_dir:
     
     # 3. Box Plots
     try:
-        fig_box = px.box(
-            df_melt, x="Metric", y="Value",
-            title=f"Box Plots for {ticker}",
-            labels={"Value": "Scaled Value", "Metric": "Metric"}
-        )
+        # Use the same df_melt from histograms (which already handles numeric columns)
+        if 'df_melt' in locals() and not df_melt.empty:
+            fig_box = px.box(
+                df_melt, x="Metric", y="Value",
+                title=f"Box Plots for {ticker}",
+                labels={"Value": "Scaled Value", "Metric": "Metric"}
+            )
+        else:
+            logger.warning(f"[perform_eda_analysis] No data available for box plots")
+            fig_box = go.Figure()
+            fig_box.update_layout(title=f"Box Plots for {ticker} - No numeric data available")
         box_json = os.path.join(output_dir, "box_plots.json")
         box_html = os.path.join(output_dir, "box_plots.html")
         with open(box_json, "w", encoding='utf-8') as f:
@@ -219,12 +347,26 @@ def perform_eda_analysis(ticker: str, preprocessed_file: str = None, output_dir:
     
     # 4. Rolling Average
     try:
-        df_rolling = df_ticker.rolling(window=7).mean()
+        # Select only numeric columns for rolling calculations
+        numeric_cols = df_ticker.select_dtypes(include=[np.number]).columns.tolist()
+        logger.info(f"[perform_eda_analysis] Numeric columns for rolling average: {numeric_cols}")
+        
+        if not numeric_cols:
+            logger.warning(f"[perform_eda_analysis] No numeric columns found for rolling average calculation")
+            df_rolling = pd.DataFrame()
+        else:
+            df_rolling = df_ticker[numeric_cols].rolling(window=7).mean()
+        
         fig_roll = go.Figure()
         for metric in ["Open", "High", "Low", "Close", "Volume"]:
             if metric in df_rolling.columns:
+                # Format Volume data to 2 decimal places
+                y_data = df_rolling[metric]
+                if metric == "Volume":
+                    y_data = y_data.round(2)
+                
                 fig_roll.add_trace(go.Scatter(
-                    x=df_rolling.index, y=df_rolling[metric], mode="lines",
+                    x=df_rolling.index, y=y_data, mode="lines",
                     name=f"{metric} (7-day MA)"
                 ))
         fig_roll.update_layout(

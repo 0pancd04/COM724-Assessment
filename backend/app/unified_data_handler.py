@@ -111,11 +111,10 @@ class UnifiedDataHandler:
             
             # Handle multi-level columns (common with yfinance)
             if hasattr(unified_df.columns, 'nlevels') and unified_df.columns.nlevels > 1:
-                logger.info(f"[UnifiedDataHandler.unify_dataframe_structure] Multi-level columns detected, flattening...")
-                # For yfinance, typically the first level has the ticker and second level has OHLCV
-                # We only want the OHLCV part
+                logger.info(f"[UnifiedDataHandler.unify_dataframe_structure] Multi-level columns detected: {unified_df.columns.tolist()}")
+                # For yfinance, the structure is (OHLCV_type, ticker) - we want OHLCV_type
                 if unified_df.columns.nlevels == 2:
-                    unified_df.columns = unified_df.columns.droplevel(0)  # Remove ticker level
+                    unified_df.columns = unified_df.columns.droplevel(1)  # Remove ticker level, keep OHLCV types
                 else:
                     # Join multi-level columns with underscore
                     unified_df.columns = ['_'.join(col).strip() for col in unified_df.columns.values]

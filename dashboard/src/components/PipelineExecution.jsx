@@ -181,6 +181,9 @@ const PipelineExecution = () => {
       setLogs([]);
       setPipelineResults(null);
       
+      // Initialize WebSocket connection before starting pipeline
+      await actions.initWebSocket();
+      
       // Add initial log
       setLogs([{
         timestamp: new Date().toISOString(),
@@ -223,23 +226,27 @@ const PipelineExecution = () => {
     { id: 'Model Training & Comparison', name: '🤖 Model Training', description: 'Training and comparing models' }
   ];
   
-  const getStepProgress = (stepId) => {
-    const stepIndex = pipelineSteps.findIndex(step => step.id === stepId);
-    if (stepIndex === -1) return 0;
-    
-    const stepProgress = (stepIndex + 1) / pipelineSteps.length * 100;
-    return Math.min(progress, stepProgress);
-  };
-  
   const getStepStatus = (stepId) => {
-    const stepIndex = pipelineSteps.findIndex(step => step.id === stepId);
-    if (stepIndex === -1) return 'pending';
-    
-    const stepProgress = (stepIndex + 1) / pipelineSteps.length * 100;
-    
-    if (progress >= stepProgress) return 'completed';
+    // Check if step is currently active
     if (currentStep === stepId) return 'active';
-    return 'pending';
+    
+    // Check if step is completed by looking at logs or completed steps
+    const stepIndex = pipelineSteps.findIndex(step => step.id === stepId);
+    const currentStepIndex = pipelineSteps.findIndex(step => step.id === currentStep);
+    
+    // If current step is further along, this step is completed
+    if (currentStepIndex > stepIndex) return 'completed';
+    
+    // If pipeline is completed and this is the last step
+    if (currentStep === 'completed' && stepIndex === pipelineSteps.length - 1) return 'completed';
+    
+    // Check completed steps from logs
+    const isCompleted = logs.some(log => 
+      log.message.includes(`✅ Completed: ${stepId}`) || 
+      log.message.includes(`Completed: ${stepId}`)
+    );
+    
+    return isCompleted ? 'completed' : 'pending';
   };
   
   return (
@@ -401,93 +408,88 @@ const PipelineExecution = () => {
         </div>
       </div>
       
-      {/* Progress Tracking */}
-      <div className="glass-card p-6">
-        <h3 className="text-xl font-semibold mb-4">Pipeline Progress</h3>
-        
-        {/* Progress Steps */}
-        <div className="relative mb-8">
-          {/* Progress Bar Background */}
-          <div className="absolute left-0 top-1/2 w-full h-2 bg-gray-200 rounded-full -translate-y-1/2 z-0"></div>
-          
-          {/* Progress Bar Fill */}
-          <div
-            className="absolute left-0 top-1/2 h-2 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full -translate-y-1/2 transition-all duration-500 z-10"
-            style={{ width: `${progress}%` }}
-          ></div>
+      {/* Progress Tracking - Only show when pipeline is active or has been started */}
+      {(isRunning || logs.length > 0 || currentStep) ? (
+        <div className="glass-card p-6">
+          <h3 className="text-xl font-semibold mb-4">Pipeline Progress</h3>
           
           {/* Progress Steps */}
-          <div className="relative grid grid-cols-6 gap-4 z-20">
-            {pipelineSteps.map((step, index) => {
-              const status = getStepStatus(step.id);
-              const stepProgress = getStepProgress(step.id);
-              
-              return (
-                <div
-                  key={step.id}
-                  className={`
-                    flex flex-col items-center text-center transition-all duration-300
-                    ${status === 'active' ? 'transform scale-110' : ''}
-                  `}
-                >
+          <div className="relative mb-8">
+            {/* Progress Steps */}
+            <div className="grid grid-cols-6 gap-4">
+              {pipelineSteps.map((step, index) => {
+                const status = getStepStatus(step.id);
+                
+                return (
                   <div
+                    key={step.id}
                     className={`
-                      w-12 h-12 rounded-full flex items-center justify-center text-lg mb-2 transition-all duration-300 relative z-30
-                      ${status === 'completed'
-                        ? 'gradient-green text-white shadow-lg'
-                        : status === 'active'
-                          ? 'gradient-blue text-white animate-pulse shadow-lg'
-                          : 'bg-gray-200 text-gray-500'
-                      }
+                      flex flex-col items-center text-center transition-all duration-300
+                      ${status === 'active' ? 'transform scale-110' : ''}
                     `}
-                    style={{ marginTop: '-6px' }}
                   >
-                    {status === 'completed' ? '✓' : index + 1}
-                  </div>
-                  <div className="text-sm font-medium text-gray-800">{step.name}</div>
-                  <div className="text-xs text-gray-500">{step.description}</div>
-                  {status === 'active' && (
-                    <div className="text-xs text-purple-600 font-medium mt-1">
-                      {stepProgress.toFixed(0)}%
+                    <div
+                      className={`
+                        w-12 h-12 rounded-full flex items-center justify-center text-lg mb-2 transition-all duration-300
+                        ${status === 'completed'
+                          ? 'gradient-green text-white shadow-lg'
+                          : status === 'active'
+                            ? 'gradient-blue text-white animate-pulse shadow-lg'
+                            : 'bg-gray-200 text-gray-500'
+                        }
+                      `}
+                    >
+                      {status === 'completed' ? '✓' : index + 1}
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        
-        {/* Overall Progress */}
-        <div className="mt-6">
-          <div className="flex justify-between text-sm mb-2">
-            <span className="font-medium text-gray-700">Overall Progress</span>
-            <span className="font-bold text-purple-600">{progress.toFixed(0)}%</span>
-          </div>
-          <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-500 rounded-full"
-              style={{ width: `${progress}%` }}
-            ></div>
-          </div>
-          {currentStep && (
-            <div className="mt-2 text-sm text-gray-600">
-              Current Step: <span className="font-medium text-purple-600">{currentStep}</span>
+                    <div className="text-sm font-medium text-gray-800">{step.name}</div>
+                    <div className="text-xs text-gray-500">{step.description}</div>
+                  </div>
+                );
+              })}
             </div>
-          )}
+          </div>
+          
+          {/* Overall Progress */}
+          <div className="mt-6">
+            <div className="flex justify-between text-sm mb-2">
+              <span className="font-medium text-gray-700">Overall Progress</span>
+              <span className="font-bold text-purple-600">{progress.toFixed(0)}%</span>
+            </div>
+            <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-500 rounded-full"
+                style={{ width: `${progress}%` }}
+              ></div>
+            </div>
+            {currentStep && (
+              <div className="mt-2 text-sm text-gray-600">
+                Current Step: <span className="font-medium text-purple-600">{currentStep}</span>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="glass-card p-6 text-center">
+          <div className="text-gray-500 mb-4">
+            <div className="text-4xl mb-2">🚀</div>
+            <h3 className="text-lg font-semibold mb-2">Ready to Start Pipeline</h3>
+            <p className="text-sm">Configure your settings above and click "Start Pipeline" to begin the cryptocurrency analysis process.</p>
+          </div>
+        </div>
+      )}
       
-      {/* Execution Logs */}
-      <div className="glass-card p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-xl font-semibold">Execution Logs</h3>
-          <button
-            onClick={() => setLogs([])}
-            className="px-3 py-1 text-sm glass-button rounded-lg"
-          >
-            Clear Logs
-          </button>
-        </div>
+      {/* Execution Logs - Only show when there are logs or pipeline is running */}
+      {(logs.length > 0 || isRunning) && (
+        <div className="glass-card p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-semibold">Execution Logs</h3>
+            <button
+              onClick={() => setLogs([])}
+              className="px-3 py-1 text-sm glass-button rounded-lg"
+            >
+              Clear Logs
+            </button>
+          </div>
         <div className="bg-gray-900 rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm">
           {logs.length > 0 ? (
             logs.map((log, index) => (
@@ -516,6 +518,7 @@ const PipelineExecution = () => {
           <div ref={logsEndRef} />
         </div>
       </div>
+      )}
       
       {/* Pipeline Results */}
       {pipelineResults && (

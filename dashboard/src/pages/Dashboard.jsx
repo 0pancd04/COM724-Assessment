@@ -328,7 +328,7 @@ export default function Dashboard() {
                         onChange={(e) => setModelType(e.target.value)}
                         className="p-2 glass-dropdown"
                     >
-                        {["arima", "sarima", "rf", "xgb", "lstm"].map((m) => (
+                        {["arima", "sarima", "random_forest", "xgboost", "lstm"].map((m) => (
                             <option key={m} value={m}>
                                 {m.toUpperCase()}
                             </option>

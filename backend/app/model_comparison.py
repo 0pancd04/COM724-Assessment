@@ -31,8 +31,8 @@ LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 logger = setup_logger("model_comparison", os.path.join(LOG_DIR, "model_comparison.log"))
 
-# Model directory
-MODEL_DIR = os.path.join(BASE_DIR, "models")
+# Model directory - use consistent path with other modules
+MODEL_DIR = os.path.join(os.path.dirname(BASE_DIR), "models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 class ModelComparison:
@@ -45,6 +45,7 @@ class ModelComparison:
         
     def prepare_time_series_data(self, ticker: str, feature: str = 'Close',
                                  source: Optional[str] = None,
+                                 history_length: str = '90d',
                                  start_date: Optional[datetime] = None,
                                  end_date: Optional[datetime] = None) -> pd.Series:
         """
@@ -54,6 +55,7 @@ class ModelComparison:
             ticker: Cryptocurrency ticker
             feature: Feature to predict (default 'Close')
             source: Data source (optional)
+            history_length: Length of historical data to use
             start_date: Start date for data
             end_date: End date for data
             
@@ -66,8 +68,13 @@ class ModelComparison:
             df = self.db.get_ohlcv_data(standard_ticker, source, start_date, end_date)
             
             if df.empty:
-                logger.error(f"No data found for {ticker}")
-                return pd.Series()
+                logger.warning(f"No data found for {ticker} from {source}, attempting fallback...")
+                # Fallback to yfinance if Binance data is insufficient
+                fallback_source = 'yfinance' if source == 'binance' else source
+                df = self.db.get_ohlcv_data(standard_ticker, fallback_source, start_date, end_date)
+                if df.empty:
+                    logger.error(f"No data found for {ticker} from fallback source {fallback_source}")
+                    return pd.Series()
             
             # Extract the feature
             if feature not in df.columns:
@@ -85,7 +92,8 @@ class ModelComparison:
     
     def train_all_models(self, ticker: str, feature: str = 'Close',
                         test_size: float = 0.2,
-                        source: Optional[str] = None) -> Dict[str, Any]:
+                        source: Optional[str] = None,
+                        history_length: str = '90d') -> Dict[str, Any]:
         """
         Train all available models for a ticker
         
@@ -94,6 +102,7 @@ class ModelComparison:
             feature: Feature to predict
             test_size: Fraction of data to use for testing
             source: Data source
+            history_length: Length of historical data to use for training
             
         Returns:
             Dictionary with model results and metrics
@@ -108,7 +117,7 @@ class ModelComparison:
             }
             
             # Prepare data
-            series = self.prepare_time_series_data(ticker, feature, source)
+            series = self.prepare_time_series_data(ticker, feature, source, history_length)
             if series.empty:
                 logger.error(f"No data available for {ticker}")
                 return results
@@ -202,7 +211,7 @@ class ModelComparison:
                     rf_metrics = self.calculate_metrics(test, rf_forecast)
                     
                     # Save model
-                    model_path = os.path.join(MODEL_DIR, f"{ticker}_rf.pkl")
+                    model_path = os.path.join(MODEL_DIR, f"{ticker}_random_forest.pkl")
                     joblib.dump((rf_model, rf_lag), model_path)
                     
                     results['models']['random_forest'] = {
@@ -235,7 +244,7 @@ class ModelComparison:
                     xgb_metrics = self.calculate_metrics(test, xgb_forecast)
                     
                     # Save model
-                    model_path = os.path.join(MODEL_DIR, f"{ticker}_xgb.pkl")
+                    model_path = os.path.join(MODEL_DIR, f"{ticker}_xgboost.pkl")
                     joblib.dump((xgb_model, xgb_lag), model_path)
                     
                     results['models']['xgboost'] = {

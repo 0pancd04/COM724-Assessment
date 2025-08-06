@@ -54,9 +54,10 @@ def download_data_yfinance(ticker: str, period: str = "5y", interval: str = "1d"
             
             # Handle multi-level columns immediately after download
             if hasattr(data.columns, 'nlevels') and data.columns.nlevels > 1:
-                logger.info(f"[download_data_yfinance] Multi-level columns detected, flattening...")
+                logger.info(f"[download_data_yfinance] Multi-level columns detected: {data.columns.tolist()}")
                 if data.columns.nlevels == 2:
-                    data.columns = data.columns.droplevel(0)  # Remove ticker level
+                    # YFinance returns (OHLCV_type, ticker) - we want to keep OHLCV_type and drop ticker
+                    data.columns = data.columns.droplevel(1)  # Remove ticker level, keep OHLCV types
                 logger.info(f"[download_data_yfinance] Flattened columns: {list(data.columns)}")
 
         return data

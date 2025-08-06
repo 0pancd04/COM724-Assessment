@@ -8,13 +8,13 @@ from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
 from sklearn.metrics import silhouette_score
 
-from .logger import setup_logger
+from .logger import setup_enhanced_logger
 
 # Setup logger
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
-logger = setup_logger("grouping_analysis", os.path.join(LOG_DIR, "grouping_analysis.log"))
+logger = setup_enhanced_logger("grouping_analysis", os.path.join(LOG_DIR, "grouping_analysis.log"))
 
 def check_existing_clustering(algorithm: str, n_clusters: int = 4):
     """Check if clustering results already exist in database"""
@@ -68,6 +68,40 @@ def perform_dimensionality_reduction(input_file: str = None,
         df = pd.read_csv(input_file, index_col=0, encoding='utf-8')
     report = {}
     
+    logger.info(f"Loaded data shape: {df.shape}", "perform_dimensionality_reduction")
+    logger.info(f"Data columns: {list(df.columns)}", "perform_dimensionality_reduction")
+    
+    # Handle NaN values - this is the main issue causing PCA/TSNE to fail
+    original_shape = df.shape
+    logger.info(f"Checking for NaN values in data: {df.isnull().sum().sum()} total NaN values", "perform_dimensionality_reduction")
+    
+    # Option 1: Drop rows/columns with too many NaNs
+    # Drop columns that are more than 50% NaN
+    nan_threshold = 0.5
+    df_cleaned = df.dropna(axis=1, thresh=int(nan_threshold * len(df)))
+    logger.info(f"After dropping columns with >{nan_threshold*100}% NaN: {df_cleaned.shape}", "perform_dimensionality_reduction")
+    
+    # Drop rows that are more than 50% NaN
+    df_cleaned = df_cleaned.dropna(axis=0, thresh=int(nan_threshold * len(df_cleaned.columns)))
+    logger.info(f"After dropping rows with >{nan_threshold*100}% NaN: {df_cleaned.shape}", "perform_dimensionality_reduction")
+    
+    # Option 2: Fill remaining NaN values with forward fill, then backward fill, then 0
+    if df_cleaned.isnull().sum().sum() > 0:
+        logger.info(f"Filling remaining {df_cleaned.isnull().sum().sum()} NaN values", "perform_dimensionality_reduction")
+        df_cleaned = df_cleaned.fillna(method='ffill').fillna(method='bfill').fillna(0)
+    
+    # Verify no NaN values remain
+    remaining_nan = df_cleaned.isnull().sum().sum()
+    if remaining_nan > 0:
+        logger.error(f"Still have {remaining_nan} NaN values after cleaning!", "perform_dimensionality_reduction")
+        # Force fill with 0
+        df_cleaned = df_cleaned.fillna(0)
+    
+    logger.info(f"Data cleaning complete: {original_shape} -> {df_cleaned.shape}, NaN values: {df_cleaned.isnull().sum().sum()}", "perform_dimensionality_reduction")
+    
+    # Use the cleaned data
+    df = df_cleaned
+    
     # Check if we have enough data
     if df.empty:
         logger.warning("Empty DataFrame provided for dimensionality reduction")
@@ -113,11 +147,22 @@ def perform_dimensionality_reduction(input_file: str = None,
         return dummy_df, report, "None", fig
 
     # PCA reduction
-    logger.info("Performing PCA reduction")
+    logger.info("Performing PCA reduction", "perform_dimensionality_reduction")
     try:
+        # Additional validation before PCA
+        if df.shape[1] < 2:
+            raise ValueError(f"Need at least 2 features for PCA, got {df.shape[1]}")
+        
+        # Check for infinite values
+        if np.isinf(df).sum().sum() > 0:
+            logger.warning("Found infinite values, replacing with 0", "perform_dimensionality_reduction")
+            df = df.replace([np.inf, -np.inf], 0)
+        
         n_components = min(2, df.shape[0], df.shape[1])
         pca = PCA(n_components=n_components, random_state=42)
         pca_comps = pca.fit_transform(df)
+        
+        logger.info(f"PCA completed successfully: {pca_comps.shape}", "perform_dimensionality_reduction")
         
         # Ensure we have 2 dimensions
         if pca_comps.shape[1] < 2:
@@ -141,19 +186,26 @@ def perform_dimensionality_reduction(input_file: str = None,
             pca_score = 0.0
             
     except Exception as e:
-        logger.error(f"PCA failed: {e}")
+        logger.error(f"PCA failed: {e}", "perform_dimensionality_reduction")
+        logger.error(f"DataFrame info - Shape: {df.shape}, NaN count: {df.isnull().sum().sum()}, Inf count: {np.isinf(df).sum().sum()}", "perform_dimensionality_reduction")
         pca_df = pd.DataFrame({"PC1": range(len(df)), "PC2": [0]*len(df), "Cluster": [0]*len(df)}, index=df.index)
         pca_score = 0.0
         
     report["PCA_silhouette"] = float(pca_score)
 
     # TSNE reduction
-    logger.info("Performing TSNE reduction")
+    logger.info("Performing TSNE reduction", "perform_dimensionality_reduction")
     try:
+        # Additional validation for TSNE
+        if df.shape[0] < 4:
+            raise ValueError(f"TSNE needs at least 4 samples, got {df.shape[0]}")
+        
         # Adjust perplexity based on sample size
         perplexity = min(5, max(2, len(df) // 4))
         tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
         tsne_comps = tsne.fit_transform(df)
+        
+        logger.info(f"TSNE completed successfully: {tsne_comps.shape}", "perform_dimensionality_reduction")
         tsne_df = pd.DataFrame(tsne_comps, index=df.index, columns=["Dim1", "Dim2"])
         
         # Clustering with safety checks
@@ -172,7 +224,7 @@ def perform_dimensionality_reduction(input_file: str = None,
             tsne_score = 0.0
             
     except Exception as e:
-        logger.error(f"TSNE failed: {e}")
+        logger.error(f"TSNE failed: {e}", "perform_dimensionality_reduction")
         tsne_df = pd.DataFrame({"Dim1": range(len(df)), "Dim2": [0]*len(df), "Cluster": [0]*len(df)}, index=df.index)
         tsne_score = 0.0
         

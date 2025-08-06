@@ -117,9 +117,8 @@ const useCryptoStore = create((set, get) => ({
         set({ loading: true });
         const response = await axios.get(API_ENDPOINTS.CORRELATION, {
           params: {
-            tickers: tickers.join(','),
-            feature,
-            source: 'yfinance'
+            selected_tickers: tickers.join(','),
+            feature
           }
         });
         
@@ -134,20 +133,50 @@ const useCryptoStore = create((set, get) => ({
       }
     },
     
-    // Fetch clustering data
-    fetchClustering: async (source = 'yfinance') => {
+    // Alias for component compatibility
+    fetchCorrelationAnalysis: async (params) => {
+      try {
+        set({ loading: true });
+        const response = await axios.get(API_ENDPOINTS.CORRELATION, {
+          params: {
+            selected_tickers: params.tickers,
+            feature: params.feature || 'Close',
+            source: params.source || 'yfinance'
+          }
+        });
+        
+        if (response.data) {
+          set({ correlationData: response.data });
+        }
+      } catch (error) {
+        console.error('Failed to fetch correlation analysis:', error);
+        toast.error('Failed to fetch correlation analysis');
+      } finally {
+        set({ loading: false });
+      }
+    },
+    
+    // Fetch clustering analysis
+    fetchClusteringAnalysis: async (params) => {
       try {
         set({ loading: true });
         const response = await axios.get(API_ENDPOINTS.CLUSTERING, {
-          params: { source }
+          params: {
+            source: params.source,
+            max_days: params.max_days,
+            n_clusters: params.n_clusters,
+            algorithm: params.algorithm,
+            feature: 'Close'
+          }
         });
         
         if (response.data) {
           set({ clusteringData: response.data });
+          toast.success('Clustering analysis completed successfully!');
         }
       } catch (error) {
-        console.error('Failed to fetch clustering:', error);
-        toast.error('Failed to fetch clustering analysis');
+        console.error('Failed to fetch clustering analysis:', error);
+        toast.error('Failed to perform clustering analysis');
       } finally {
         set({ loading: false });
       }
@@ -180,13 +209,13 @@ const useCryptoStore = create((set, get) => ({
     },
     
     // Fetch signals
-    fetchSignals: async (ticker, modelType = 'arima', periods = 7) => {
+    fetchSignals: async (ticker, modelType = 'arima', periods = 7, source = 'yfinance') => {
       try {
         const response = await axios.get(API_ENDPOINTS.SIGNALS(ticker), {
           params: { 
             model_type: modelType, 
             periods, 
-            source: 'yfinance' 
+            source 
           }
         });
         
@@ -245,6 +274,12 @@ const useCryptoStore = create((set, get) => ({
     
     // Initialize WebSocket connection
     initWebSocket: async () => {
+      const state = get();
+      // Only connect if not already connected
+      if (state.wsConnection) {
+        return;
+      }
+
       try {
         const ws = new WebSocket(API_ENDPOINTS.WEBSOCKET);
         let hasShownError = false;
@@ -252,25 +287,43 @@ const useCryptoStore = create((set, get) => ({
         ws.onopen = () => {
           console.log('WebSocket connected');
           set({ wsConnection: ws });
-          // Reset error flag when successfully connected
           hasShownError = false;
         };
         
         ws.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data);
-            set(state => ({
-              wsMessages: [...state.wsMessages, message],
-              pipelineStatus: message.pipeline_status || message.status || state.pipelineStatus
-            }));
+            set(state => {
+              // Update pipeline status
+              const newStatus = message.pipeline_status || message.status || state.pipelineStatus;
+              
+              // If pipeline ended, schedule WebSocket cleanup
+              if (message.type === 'pipeline_end') {
+                setTimeout(() => {
+                  const currentState = get();
+                  if (currentState.wsConnection && !currentState.pipelineStatus?.is_running) {
+                    console.log('Pipeline completed, closing WebSocket');
+                    currentState.wsConnection.close();
+                    set({ wsConnection: null, wsMessages: [] });
+                  }
+                }, 5000); // Give time for final messages
+              }
+              
+              return {
+                wsMessages: [...state.wsMessages, message],
+                pipelineStatus: newStatus
+              };
+            });
             
-            // Show toast for important messages
-            if (message.level === 'error') {
+            // Only show important messages
+            if (message.type === 'pipeline_end') {
+              if (message.success) {
+                toast.success('Pipeline completed successfully! 🎉');
+              } else {
+                toast.error('Pipeline failed to complete');
+              }
+            } else if (message.level === 'error') {
               toast.error(message.message || message.content);
-            } else if (message.level === 'success') {
-              toast.success(message.message || message.content);
-            } else if (message.level === 'info') {
-              toast.info(message.message || message.content);
             }
           } catch (error) {
             console.error('Failed to parse WebSocket message:', error);
@@ -279,25 +332,29 @@ const useCryptoStore = create((set, get) => ({
         
         ws.onerror = (error) => {
           console.error('WebSocket error:', error);
-          // Only show error toast once
           if (!hasShownError) {
-            toast.error('WebSocket connection error. Retrying in background...');
+            toast.error('Pipeline connection error');
             hasShownError = true;
           }
         };
         
         ws.onclose = () => {
           console.log('WebSocket disconnected');
+          const currentState = get();
           set({ wsConnection: null });
-          // Only show disconnection message once
-          if (!hasShownError) {
-            toast.warn('WebSocket disconnected. Reconnecting in background...');
-            hasShownError = true;
+          
+          // Only reconnect if pipeline is still running
+          if (currentState.pipelineStatus?.is_running) {
+            if (!hasShownError) {
+              toast.warn('Pipeline connection lost, reconnecting...');
+              hasShownError = true;
+            }
+            setTimeout(() => {
+              get().actions.initWebSocket();
+            }, 5000);
+          } else {
+            set({ wsMessages: [] }); // Clear messages if pipeline is done
           }
-          // Attempt to reconnect after 5 seconds
-          setTimeout(() => {
-            get().actions.initWebSocket();
-          }, 5000);
         };
       } catch (error) {
         console.error('Failed to initialize WebSocket:', error);

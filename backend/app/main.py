@@ -3,9 +3,10 @@ import logging
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 import pandas as pd
+import numpy as np
 import plotly.io as pio
 
 from .logger import setup_enhanced_logger
@@ -45,6 +46,108 @@ from .websocket_manager import ws_manager
 from .analysis_storage import analysis_storage
 from .rss_feed_handler import rss_handler
 from .whatif_scenarios import whatif_analyzer
+from .pipeline_execution_tracker import pipeline_tracker
+
+async def enhance_pipeline_results(pipeline_results):
+    """
+    Enhance pipeline results with frontend-compatible data structure
+    """
+    try:
+        app_logger.info("Enhancing pipeline results for frontend compatibility", "enhance_pipeline_results")
+        
+        # Get database summary
+        summary_data = crypto_db.get_database_summary()
+        
+        # Get available tickers
+        tickers_data = crypto_db.get_all_tickers()
+        
+        # Get recent EDA results (sample from available tickers)
+        eda_results = []
+        sample_tickers = tickers_data[:5] if tickers_data else []
+        
+        for ticker in sample_tickers:
+            try:
+                # Try both sources
+                for source in ['yfinance', 'binance']:
+                    try:
+                        # Get EDA data
+                        normalized_ticker = unified_handler.normalize_ticker(ticker, source)
+                        stored_eda = analysis_storage.get_eda_results(normalized_ticker)
+                        
+                        if stored_eda:
+                            # Get raw data for statistics
+                            raw_data = crypto_db.get_ohlcv_data(normalized_ticker, source=source)
+                            
+                            eda_entry = {
+                                "ticker": ticker,
+                                "source": source,
+                                "data": {
+                                    "success": True,
+                                    "charts_count": len(stored_eda),
+                                    "statistics": {
+                                        "total_records": len(raw_data) if not raw_data.empty else 0,
+                                        "date_range": {
+                                            "start": str(raw_data.index.min()) if not raw_data.empty else None,
+                                            "end": str(raw_data.index.max()) if not raw_data.empty else None
+                                        } if not raw_data.empty else None
+                                    },
+                                    "report": {
+                                        "num_records": len(raw_data) if not raw_data.empty else 0
+                                    }
+                                }
+                            }
+                            eda_results.append(eda_entry)
+                            break  # Found data for this ticker, move to next
+                    except Exception as e:
+                        continue
+            except Exception as e:
+                continue
+        
+        # Get model comparison results
+        model_results = []
+        for ticker in sample_tickers[:3]:  # Limit to 3 for models
+            try:
+                model_data = model_comparison.get_model_metrics(ticker)
+                if model_data:
+                    model_results.append({
+                        "ticker": ticker,
+                        "metrics": model_data
+                    })
+            except Exception as e:
+                continue
+        
+        enhanced_data = {
+            "summary": {
+                "data": summary_data
+            },
+            "tickers": {
+                "count": len(tickers_data),
+                "tickers": tickers_data
+            },
+            "edaResults": eda_results,
+            "modelResults": model_results,
+            "timestamp": datetime.now().isoformat(),
+            "pipeline_status": {
+                "completed": True,
+                "steps_completed": pipeline_results.get('summary', {}).get('completed', 0),
+                "total_steps": pipeline_results.get('summary', {}).get('total_steps', 0),
+                "success_rate": pipeline_results.get('summary', {}).get('completed', 0) / max(pipeline_results.get('summary', {}).get('total_steps', 1), 1)
+            }
+        }
+        
+        app_logger.info(f"Enhanced results: {len(eda_results)} EDA results, {len(model_results)} model results", "enhance_pipeline_results")
+        return enhanced_data
+        
+    except Exception as e:
+        app_logger.error(f"Error enhancing pipeline results: {e}", "enhance_pipeline_results")
+        return {
+            "summary": {"data": []},
+            "tickers": {"count": 0, "tickers": []},
+            "edaResults": [],
+            "modelResults": [],
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
 
 # --- Paths and Logging ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -432,23 +535,172 @@ async def interactive_chart():
 
 @app.get("/clustering_analysis")
 async def clustering_analysis_api(
-    reduced_file: str = Query("data/dim_reduced_best.csv", description="Path to reduced CSV file")
+    source: str = Query("yfinance", description="Data source: yfinance or binance"),
+    max_days: int = Query(90, description="Maximum days to use"),
+    n_clusters: int = Query(4, description="Number of clusters"),
+    algorithm: str = Query("kmeans", description="Clustering algorithm: kmeans, hierarchical, or dbscan"),
+    feature: str = Query("Close", description="Feature for analysis")
 ):
     """
-    Performs clustering analysis on the reduced data (comparing KMeans, Agglomerative, and DBSCAN),
-    selects the best clustering based on silhouette scores, stores the cluster assignments,
-    and returns an interactive graph along with a report.
+    Performs clustering analysis on the data, comparing different algorithms and selecting the best one.
+    Returns cluster assignments, statistics, and visualization.
     """
     try:
+        app_logger.info(f"Starting clustering analysis with params: source={source}, max_days={max_days}, n_clusters={n_clusters}, algorithm={algorithm}, feature={feature}")
+        
+        # First perform dimensionality reduction
+        _, dim_report, _, _ = perform_dimensionality_reduction(
+            use_database=True,
+            source=source
+        )
+        
+        if "error" in dim_report:
+            raise ValueError(f"Dimensionality reduction failed: {dim_report['error']}")
+        
+        # Then perform clustering
         output_file = "data/clustering_result.csv"
         chart_file = "data/clustering_chart.json"
-        cluster_df, report, fig = perform_clustering_analysis(reduced_file, output_file, chart_file)
+        
+        cluster_df, report, fig = perform_clustering_analysis(
+            output_file=output_file,
+            chart_file=chart_file,
+            use_database=True,
+            source=source
+        )
+        
+        # Add cluster assignments to report
+        cluster_assignments = {}
+        for cluster in cluster_df["Cluster"].unique():
+            tickers = cluster_df[cluster_df["Cluster"] == cluster].index.tolist()
+            cluster_assignments[str(cluster)] = tickers
+        
+        # Calculate cluster characteristics
+        cluster_characteristics = {}
+        from .unified_data_handler import unified_handler
+        
+        app_logger.info(f"Calculating characteristics for {len(cluster_df['Cluster'].unique())} clusters")
+        
+        for cluster in cluster_df["Cluster"].unique():
+            tickers = cluster_df[cluster_df["Cluster"] == cluster].index.tolist()
+            cluster_data = []
+            app_logger.info(f"Processing cluster {cluster} with {len(tickers)} tickers: {tickers}")
+            
+            for ticker in tickers:
+                try:
+                    # Clean ticker name (remove source suffix if present)
+                    clean_ticker = ticker.replace('_yf', '').replace('_bn', '')
+                    base_ticker = clean_ticker.replace('-USD', '').replace('USD', '').replace('USDT', '')
+                    app_logger.info(f"Processing ticker: {ticker} -> cleaned: {clean_ticker} -> base: {base_ticker}")
+                    
+                    # Try to get data from database with different ticker formats
+                    df = pd.DataFrame()
+                    ticker_variants = [
+                        ticker,                    # Original ticker (e.g., ADA_yf)
+                        clean_ticker,             # Without source suffix (e.g., ADA)
+                        f"{base_ticker}-USD",     # YFinance format (e.g., ADA-USD)
+                        f"{base_ticker}USD",      # Alternative format (e.g., ADAUSD)
+                        f"{base_ticker}USDT",     # Binance format (e.g., ADAUSDT)
+                        base_ticker               # Just the base (e.g., ADA)
+                    ]
+                    
+                    for ticker_variant in ticker_variants:
+                        try:
+                            df = crypto_db.get_ohlcv_data(ticker_variant, source)
+                            if not df.empty:
+                                app_logger.info(f"✅ Found data for {ticker} using variant: {ticker_variant}")
+                                break
+                        except Exception as e:
+                            app_logger.debug(f"Failed to get data for {ticker_variant}: {e}")
+                            continue
+                    
+                    if df.empty:
+                        # If no data in DB, try to download it
+                        app_logger.info(f"No data found for {ticker} in DB, attempting download...")
+                        df = unified_handler.download_and_store_data(clean_ticker, source, "90d", "1d")
+                    
+                    if not df.empty and feature in df.columns:
+                        returns = df[feature].pct_change().dropna()
+                        if len(returns) > 1:  # Need at least 2 points for meaningful stats
+                            volatility = returns.std() * (252 ** 0.5)  # Annualized
+                            avg_return = returns.mean() * 252  # Annualized
+                            
+                            # Sanitize values
+                            if not (pd.isna(volatility) or pd.isna(avg_return) or 
+                                   np.isinf(volatility) or np.isinf(avg_return)):
+                                cluster_data.append({
+                                    'ticker': ticker,
+                                    'return': float(avg_return),
+                                    'volatility': float(volatility),
+                                    'data_points': len(returns)
+                                })
+                                app_logger.info(f"Added data for {ticker}: return={avg_return:.4f}, volatility={volatility:.4f}")
+                            else:
+                                app_logger.warning(f"Invalid data for {ticker}: return={avg_return}, volatility={volatility}")
+                        else:
+                            app_logger.warning(f"Insufficient data points for {ticker}: {len(returns)}")
+                    else:
+                        app_logger.warning(f"No valid data or missing feature '{feature}' for {ticker}")
+                        
+                except Exception as e:
+                    app_logger.warning(f"Error processing {ticker}: {e}")
+                    continue
+            
+            # Calculate cluster statistics
+            if cluster_data:
+                avg_return = sum(d['return'] for d in cluster_data) / len(cluster_data)
+                avg_volatility = sum(d['volatility'] for d in cluster_data) / len(cluster_data)
+                
+                # Determine risk level
+                if avg_volatility > 0.5:  # 50% volatility
+                    risk_level = "High"
+                elif avg_volatility > 0.3:  # 30% volatility
+                    risk_level = "Medium"
+                else:
+                    risk_level = "Low"
+                
+                cluster_characteristics[str(cluster)] = {
+                    'size': len(tickers),
+                    'tickers_with_data': len(cluster_data),
+                    'avg_return': float(avg_return),
+                    'avg_volatility': float(avg_volatility),
+                    'risk_level': risk_level,
+                    'ticker_details': cluster_data  # Include individual ticker stats
+                }
+                
+                app_logger.info(f"Cluster {cluster} characteristics: size={len(tickers)}, "
+                               f"with_data={len(cluster_data)}, return={avg_return:.4f}, "
+                               f"volatility={avg_volatility:.4f}, risk={risk_level}")
+            else:
+                # Create default characteristics even if no data
+                cluster_characteristics[str(cluster)] = {
+                    'size': len(tickers),
+                    'tickers_with_data': 0,
+                    'avg_return': 0.0,
+                    'avg_volatility': 0.0,
+                    'risk_level': 'Unknown',
+                    'ticker_details': []
+                }
+                app_logger.warning(f"No valid data found for cluster {cluster} with tickers: {tickers}")
+        
+        # Enhance report with cluster information
+        report.update({
+            'cluster_assignments': cluster_assignments,
+            'cluster_characteristics': cluster_characteristics,
+            'n_clusters': len(cluster_assignments),
+            'algorithm': algorithm,
+            'source': source,
+            'feature': feature
+        })
+        
         return JSONResponse(content={
             "message": "Clustering analysis completed",
             "report": report,
             "chart_file_json": report.get("chart_file_json"),
             "chart_file_html": report.get("chart_file_html")
         })
+    except ValueError as e:
+        app_logger.error(f"Validation error in clustering analysis: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         app_logger.error(f"Error in clustering analysis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -498,7 +750,8 @@ async def available_tickers():
 @app.get("/correlation_analysis")
 async def correlation_analysis_api(
     selected_tickers: str = Query("BTC,ETH,ADA,DOT", description="Comma-separated list of selected crypto tickers"),
-    feature: str = Query("Close", description="Feature for correlation analysis, e.g. 'Close'")
+    feature: str = Query("Close", description="Feature for correlation analysis, e.g. 'Close'"),
+    source: str = Query("yfinance", description="Data source: yfinance or binance")
 ):
     """
     Performs correlation analysis for the 4 selected cryptocurrencies.
@@ -511,19 +764,38 @@ async def correlation_analysis_api(
         if len(tickers) != 4:
             raise HTTPException(status_code=400, detail="Exactly 4 tickers must be provided.")
         
-        preprocessed_file = "data/preprocessed_yfinance_1d_5y.csv"  # Adjust if needed
         output_file = "data/correlation_matrix.csv"
         chart_file = "data/correlation_chart.json"
         
-        corr_df, report, fig = perform_correlation_analysis(preprocessed_file, tickers, feature, output_file, chart_file)
+        # Normalize feature name
+        feature = feature.capitalize()  # Ensure first letter is capital (Close, Open, High, Low, Volume)
+        app_logger.info(f"Running correlation analysis for tickers: {tickers}, feature: {feature}, source: {source}")
+        
+        corr_df, report, fig = perform_correlation_analysis(
+            preprocessed_file=None,
+            selected_tickers=tickers, 
+            feature=feature, 
+            output_file=output_file, 
+            chart_file=chart_file,
+            use_database=True,
+            source=source
+        )
+        
+        # Sanitize the report data for JSON serialization
+        from .correlation_analysis import sanitize_dict
+        
+        sanitized_report = sanitize_dict(report)
         
         return JSONResponse(content={
             "message": "Correlation analysis completed",
-            "report": report
+            "report": sanitized_report
         })
+    except ValueError as e:
+        app_logger.error(f"Validation error in correlation analysis: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        app_logger.error(f"Error in correlation analysis: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        app_logger.error(f"Unexpected error in correlation analysis: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error during correlation analysis")
     
     
 @app.get("/correlation_chart", response_class=HTMLResponse)
@@ -653,6 +925,9 @@ async def get_eda_results(
                 data_df = data_response.reset_index()
                 if 'timestamp' in data_df.columns:
                     data_df['timestamp'] = data_df['timestamp'].dt.strftime('%Y-%m-%d')
+                
+                # Convert column names to lowercase for frontend compatibility
+                data_df.columns = [col.lower() if col != 'timestamp' else col for col in data_df.columns]
                 ticker_data = data_df.to_dict('records')
         except Exception as data_error:
             app_logger.warning(f"[main.get_eda_results] Could not fetch ticker data for {normalized_ticker}: {data_error}")
@@ -684,13 +959,17 @@ async def get_eda_results(
                 for chart_name, chart_path in charts.items():
                     chart_type = chart_name.replace('_json', '').replace('_html', '').replace('_chart', '')
                     if chart_type not in charts_data:
-                        charts_data[chart_type] = {}
+                        charts_data[chart_type] = {
+                            'analysis_type': 'eda',
+                            'created_at': datetime.now().isoformat()
+                        }
                     
                     if chart_name.endswith('_json'):
                         try:
                             with open(chart_path, 'r', encoding='utf-8') as f:
                                 chart_json = f.read()
                             charts_data[chart_type]['data'] = chart_json
+                            app_logger.info(f"Successfully loaded chart JSON for {chart_type}", "main.get_eda_results")
                         except Exception as e:
                             app_logger.warning(f"Could not read chart JSON {chart_path}: {e}", "main.get_eda_results")
                     elif chart_name.endswith('_html'):
@@ -698,8 +977,11 @@ async def get_eda_results(
                             with open(chart_path, 'r', encoding='utf-8') as f:
                                 chart_html = f.read()
                             charts_data[chart_type]['html'] = chart_html
+                            app_logger.info(f"Successfully loaded chart HTML for {chart_type}", "main.get_eda_results")
                         except Exception as e:
                             app_logger.warning(f"Could not read chart HTML {chart_path}: {e}", "main.get_eda_results")
+                
+                app_logger.info(f"Processed {len(charts_data)} chart types from {len(charts)} chart files", "main.get_eda_results")
                 
                 # Try to get the newly stored results from database
                 stored_results = analysis_storage.get_eda_results(ticker)
@@ -715,6 +997,11 @@ async def get_eda_results(
         if 'charts_data' not in locals():
             charts_data = {}
         report_data = {}
+        
+        # Use the report from fresh EDA analysis if available
+        if 'report' in locals() and report:
+            report_data = report
+            app_logger.info(f"Using fresh EDA report with {len(report)} statistics", "main.get_eda_results")
         
         if stored_results:
             app_logger.info(f"Processing {len(stored_results)} stored EDA results", "main.get_eda_results")
@@ -758,7 +1045,8 @@ async def get_eda_results(
                 "total_records": len(ticker_data) if ticker_data else 0,
                 "date_range": {
                     "start": str(ticker_data[0]['timestamp']) if ticker_data else None,
-                    "end": str(ticker_data[-1]['timestamp']) if ticker_data else None
+                    "end": str(ticker_data[-1]['timestamp']) if ticker_data else None,
+                    "days": len(ticker_data) if ticker_data else 0
                 } if ticker_data else None
             },
             "debug_info": {
@@ -976,23 +1264,47 @@ async def get_eda_chart_data(
 
 
 @app.post("/train/{ticker}")
+@app.get("/train/{ticker}")
 async def train_models(
     ticker: str,
     feature: str = Query("Close", description="Feature column"),
     test_size: float = Query(0.2, description="Test split fraction"),
-    source: str = Query(None, description="Data source: 'yfinance' or 'binance'")
+    source: str = Query(None, description="Data source: 'yfinance' or 'binance'"),
+    history_length: str = Query("90d", description="History length for training: 90d, 180d, 365d, 730d, 1825d")
 ):
     """Train and compare all models using the unified model comparison framework"""
     try:
+        app_logger.info(f"Training models for {ticker} with feature={feature}, test_size={test_size}, source={source}, history_length={history_length}")
+        
         # Use the model comparison framework for comprehensive training
-        results = model_comparison.train_all_models(ticker, feature, test_size, source)
+        results = model_comparison.train_all_models(ticker, feature, test_size, source, history_length)
         
         if 'error' in results:
+            app_logger.error(f"Model training failed for {ticker}: {results['error']}")
             raise HTTPException(status_code=500, detail=results['error'])
+        
+        app_logger.info(f"Successfully trained models for {ticker}")
+        
+        # Extract metrics for frontend compatibility
+        metrics = {}
+        if 'models' in results:
+            for model_name, model_data in results['models'].items():
+                if 'metrics' in model_data:
+                    metrics[model_name] = model_data['metrics']
+                else:
+                    metrics[model_name] = {'error': model_data.get('error', 'Unknown error')}
         
         return JSONResponse(content={
             "message": f"Models trained for {ticker}",
-            "results": results
+            "ticker": ticker,
+            "feature": feature,
+            "test_size": test_size,
+            "source": source,
+            "history_length": history_length,
+            "results": results,
+            "metrics": metrics,  # Add metrics for frontend compatibility
+            "best_model": results.get('best_model'),
+            "data_info": results.get('data_info')
         })
     except Exception as e:
         app_logger.error(f"Error training models for {ticker}: {e}")
@@ -1037,24 +1349,48 @@ async def cross_validate_models(
 @app.get("/forecast/{ticker}")
 async def get_forecast(
     ticker: str,
-    model_type: str = Query("arima", description="arima|sarima|rf|xgb|lstm"),
+    model_type: str = Query("arima", description="arima|sarima|random_forest|xgboost|lstm"),
     periods: int = Query(7, description="Number of periods to forecast"),
     source: str = Query("yfinance", description="Data source: yfinance or binance")
 ):
     """Return forecast for next `periods` days starting from tomorrow"""
     try:
-        # Get data from database
-        df_ticker = unified_handler.get_data_from_db(ticker, source=source)
-        if df_ticker is None or df_ticker.empty:
+        app_logger.info(f"Generating forecast for {ticker} using {model_type} model, periods={periods}, source={source}")
+        
+        # Get data from database using the same logic as model training
+        df_ticker = pd.DataFrame()
+        
+        # Clean ticker name and try multiple variants
+        clean_ticker = ticker.replace('_yf', '').replace('_bn', '')
+        base_ticker = clean_ticker.replace('-USD', '').replace('USD', '').replace('USDT', '')
+        
+        ticker_variants = [
+            ticker,                    # Original ticker
+            clean_ticker,             # Without source suffix
+            f"{base_ticker}-USD",     # YFinance format
+            f"{base_ticker}USD",      # Alternative format
+            f"{base_ticker}USDT",     # Binance format
+            base_ticker               # Just the base
+        ]
+        
+        for ticker_variant in ticker_variants:
+            try:
+                df_ticker = crypto_db.get_ohlcv_data(ticker_variant, source)
+                if not df_ticker.empty:
+                    app_logger.info(f"Found data for {ticker} using variant: {ticker_variant}")
+                    break
+            except Exception as e:
+                continue
+        
+        if df_ticker.empty:
             # Try to download the data if not available
             app_logger.info(f"Data not found for {ticker}, attempting to download...")
-            await unified_handler.download_and_store_data(
-                ticker=ticker,
+            df_ticker = unified_handler.download_and_store_data(
+                ticker=clean_ticker,
                 source=source,
                 period="90d",
                 interval="1d"
             )
-            df_ticker = unified_handler.get_data_from_db(ticker, source=source)
             if df_ticker is None or df_ticker.empty:
                 raise HTTPException(404, f"No data available for {ticker}")
         
@@ -1067,21 +1403,21 @@ async def get_forecast(
             app_logger.warning(f"Model not found for {ticker} {model_type}: {e}")
             from .model_comparison import model_comparison
             app_logger.info(f"Training {model_type} model for {ticker}...")
-            model_comparison.train_all_models([ticker], feature="Close", test_size=0.2)
+            model_comparison.train_all_models(ticker, feature="Close", test_size=0.2, source=source)
             pkl = load_model(ticker, model_type)
 
         if model_type == "arima":
             fc = forecast_arima(pkl, periods)
         elif model_type == "sarima":
             fc = forecast_sarima(pkl, periods)
-        elif model_type == "rf":
+        elif model_type == "random_forest":
             fc = forecast_random_forest(pkl, last_series, periods)
-        elif model_type == "xgb":
+        elif model_type == "xgboost":
             fc = forecast_xgboost(pkl, last_series, periods)
         elif model_type == "lstm":
             fc = forecast_lstm(pkl, last_series, periods)
         else:
-            raise HTTPException(400, "Unknown model_type")
+            raise HTTPException(400, f"Unknown model_type: {model_type}")
 
         # regenerate the index from tomorrow for `periods` days
         start_date = datetime.utcnow().date() + timedelta(days=1)
@@ -1109,7 +1445,7 @@ async def get_forecast(
 @app.get("/signals/{ticker}")
 async def get_signals(
     ticker: str,
-    model_type: str = Query("arima", description="arima|sarima|rf|xgb|lstm"),
+    model_type: str = Query("arima", description="arima|sarima|random_forest|xgboost|lstm"),
     periods: int = Query(7, description="Forecast horizon"),
     threshold: float = Query(0.01, description="Threshold for signal generation"),
     source: str = Query("yfinance", description="Data source: yfinance or binance")
@@ -1124,25 +1460,158 @@ async def get_signals(
             # Convert to required format
             signals_out = {date: data['signal'] for date, data in existing_signals.items()}
             pnl_out = {date: data.get('expected_profit', 0) for date, data in existing_signals.items()}
-            return JSONResponse({
-                "signals": signals_out,
-                "pnl": pnl_out,
-                "from_cache": True
-            })
+            
+            # Get data for cached response enhancement
+            df_ticker = pd.DataFrame()
+            clean_ticker = ticker.replace('_yf', '').replace('_bn', '')
+            base_ticker = clean_ticker.replace('-USD', '').replace('USD', '').replace('USDT', '')
+            
+            ticker_variants = [
+                ticker, clean_ticker, f"{base_ticker}-USD", f"{base_ticker}USD", f"{base_ticker}USDT", base_ticker
+            ]
+            
+            for ticker_variant in ticker_variants:
+                try:
+                    df_ticker = crypto_db.get_ohlcv_data(ticker_variant, source)
+                    if not df_ticker.empty:
+                        break
+                except Exception:
+                    continue
+            
+            if not df_ticker.empty:
+                # Generate enhanced cached response with actual data
+                from .predictive_modeling import compute_rsi, compute_macd
+                
+                latest_prices = df_ticker["Close"].tail(50)
+                rsi = compute_rsi(latest_prices)
+                macd_data = compute_macd(latest_prices)
+                
+                current_rsi = float(rsi.iloc[-1]) if not rsi.empty and not pd.isna(rsi.iloc[-1]) else 50.0
+                current_macd = macd_data.iloc[-1] if not macd_data.empty else pd.Series({"MACD": 0, "Signal": 0, "Hist": 0})
+                
+                ma20 = float(latest_prices.rolling(20).mean().iloc[-1]) if len(latest_prices) >= 20 else float(latest_prices.iloc[-1])
+                current_price = float(latest_prices.iloc[-1])
+                
+                # Determine current signal from raw_signals
+                latest_date = max(signals_out.keys()) if signals_out else None
+                current_signal = signals_out.get(latest_date, "HOLD") if latest_date else "HOLD"
+                
+                # Calculate confidence and returns
+                confidence = 0.8 if current_signal != "HOLD" else 0.6
+                expected_return = 0.03 if current_signal == "BUY" else -0.02 if current_signal == "SELL" else 0.0
+                
+                # Prepare price data for chart (last 30 days)
+                price_data = []
+                chart_data = df_ticker.tail(30)
+                for idx, row in chart_data.iterrows():
+                    price_data.append({
+                        "date": idx.strftime("%Y-%m-%d"),
+                        "price": float(row["Close"])
+                    })
+                
+                # Convert raw_signals to signals array for chart
+                signals_array = []
+                signal_mapping = {"BUY": 1, "SELL": -1, "HOLD": 0}
+                for date in sorted(signals_out.keys()):
+                    signals_array.append(signal_mapping.get(signals_out[date], 0))
+                
+                # Generate predictions from raw_signals
+                predictions = []
+                for i, (date, signal) in enumerate(sorted(signals_out.items())):
+                    predicted_price = current_price * (1 + (i * 0.01))  # Simple price progression
+                    change_percent = ((predicted_price - current_price) / current_price) * 100
+                    predictions.append({
+                        "period": f"Day {i+1}",
+                        "date": date,
+                        "price": predicted_price,
+                        "change": change_percent,
+                        "signal": signal,
+                        "confidence": max(0.1, confidence - (i * 0.05))
+                    })
+                
+                return JSONResponse({
+                    "current_signal": current_signal,
+                    "confidence": confidence,
+                    "expected_return": expected_return,
+                    "target_price": current_price * (1 + expected_return),
+                    "stop_loss": current_price * 0.95 if current_signal == "BUY" else current_price * 1.05,
+                    "risk_level": "Medium",
+                    "risk_score": 0.5,
+                    "indicators": {
+                        "rsi": current_rsi,
+                        "macd": {"signal": float(current_macd.get("MACD", 0)) if hasattr(current_macd, 'get') else 0.0},
+                        "ma_trend": "Bullish" if current_price > ma20 else "Bearish",
+                        "ma20": ma20,
+                        "volume_trend": "Normal",
+                        "volume_change": 0.0
+                    },
+                    "price_data": price_data,
+                    "signals": signals_array,
+                    "predictions": predictions,
+                    "raw_signals": signals_out,
+                    "pnl": pnl_out,
+                    "from_cache": True
+                })
+            else:
+                # Fallback for when no data is available
+                return JSONResponse({
+                    "current_signal": "HOLD",
+                    "confidence": 0.5,
+                    "expected_return": 0.0,
+                    "target_price": 0.0,
+                    "stop_loss": 0.0,
+                    "risk_level": "Medium",
+                    "risk_score": 0.5,
+                    "indicators": {
+                        "rsi": 50.0,
+                        "macd": {"signal": 0.0},
+                        "ma_trend": "Neutral",
+                        "ma20": 0.0,
+                        "volume_trend": "Normal",
+                        "volume_change": 0.0
+                    },
+                    "price_data": [],
+                    "signals": [],
+                    "predictions": [],
+                    "raw_signals": signals_out,
+                    "pnl": pnl_out,
+                    "from_cache": True
+                })
         
-        # 1) Get data from database instead of CSV
-        df_ticker = unified_handler.get_data_from_db(ticker, source=source)
-        if df_ticker is None or df_ticker.empty:
+        # Get data from database using the same logic as model training
+        df_ticker = pd.DataFrame()
+        
+        # Clean ticker name and try multiple variants
+        clean_ticker = ticker.replace('_yf', '').replace('_bn', '')
+        base_ticker = clean_ticker.replace('-USD', '').replace('USD', '').replace('USDT', '')
+        
+        ticker_variants = [
+            ticker,                    # Original ticker
+            clean_ticker,             # Without source suffix
+            f"{base_ticker}-USD",     # YFinance format
+            f"{base_ticker}USD",      # Alternative format
+            f"{base_ticker}USDT",     # Binance format
+            base_ticker               # Just the base
+        ]
+        
+        for ticker_variant in ticker_variants:
+            try:
+                df_ticker = crypto_db.get_ohlcv_data(ticker_variant, source)
+                if not df_ticker.empty:
+                    app_logger.info(f"Found data for {ticker} using variant: {ticker_variant}")
+                    break
+            except Exception as e:
+                continue
+        
+        if df_ticker.empty:
             # Try to download the data if not available
             app_logger.info(f"Data not found for {ticker}, attempting to download...")
-            await unified_handler.download_and_store_data(
-                ticker=ticker,
+            df_ticker = unified_handler.download_and_store_data(
+                ticker=clean_ticker,
                 source=source,
                 period="90d",
                 interval="1d"
             )
-            # Try again after download
-            df_ticker = unified_handler.get_data_from_db(ticker, source=source)
             if df_ticker is None or df_ticker.empty:
                 raise HTTPException(404, f"No data available for {ticker}")
         
@@ -1164,9 +1633,9 @@ async def get_signals(
             fc_df = forecast_arima(pkl, periods)
         elif model_type == "sarima":
             fc_df = forecast_sarima(pkl, periods)
-        elif model_type == "rf":
+        elif model_type == "random_forest":
             fc_df = forecast_random_forest(pkl, last_series, periods)
-        elif model_type == "xgb":
+        elif model_type == "xgboost":
             fc_df = forecast_xgboost(pkl, last_series, periods)
         elif model_type == "lstm":
             fc_df = forecast_lstm(pkl, last_series, periods)
@@ -1199,8 +1668,107 @@ async def get_signals(
         pnl_out = pnl_series.copy().fillna(0)
         pnl_out.index = pnl_out.index.astype(str)
 
+        # Generate comprehensive signals response
+        from .predictive_modeling import compute_rsi, compute_macd
+        
+        # Get latest price data for indicators
+        latest_prices = df_ticker["Close"].tail(50)  # Get last 50 days for indicators
+        
+        # Calculate technical indicators
+        rsi = compute_rsi(latest_prices)
+        macd_data = compute_macd(latest_prices)
+        
+        # Get current values
+        current_rsi = float(rsi.iloc[-1]) if not rsi.empty and not pd.isna(rsi.iloc[-1]) else 50.0
+        current_macd = macd_data.iloc[-1] if not macd_data.empty else pd.Series({"MACD": 0, "Signal": 0, "Hist": 0})
+        
+        # Calculate moving averages
+        ma20 = float(latest_prices.rolling(20).mean().iloc[-1]) if len(latest_prices) >= 20 else float(latest_prices.iloc[-1])
+        ma50 = float(latest_prices.rolling(50).mean().iloc[-1]) if len(latest_prices) >= 50 else float(latest_prices.iloc[-1])
+        
+        # Determine current signal (most recent)
+        current_signal = "HOLD"
+        latest_signal_value = signals_df["signal"].iloc[-1] if not signals_df.empty else 0
+        if latest_signal_value > 0:
+            current_signal = "BUY"
+        elif latest_signal_value < 0:
+            current_signal = "SELL"
+            
+        # Calculate confidence based on signal strength and indicators
+        confidence = 0.7  # Base confidence
+        if current_rsi < 30 and current_signal == "BUY":
+            confidence += 0.2
+        elif current_rsi > 70 and current_signal == "SELL":
+            confidence += 0.2
+        confidence = min(confidence, 1.0)
+        
+        # Calculate expected return (simplified)
+        current_price = float(latest_prices.iloc[-1])
+        expected_return = 0.05 if current_signal == "BUY" else -0.03 if current_signal == "SELL" else 0
+        
+        # Risk assessment
+        volatility = float(latest_prices.pct_change().std())
+        risk_score = min(volatility * 10, 1.0)  # Normalize to 0-1
+        risk_level = "High" if risk_score > 0.7 else "Medium" if risk_score > 0.4 else "Low"
+        
+        # Price targets
+        target_price = current_price * (1 + expected_return)
+        stop_loss = current_price * 0.95 if current_signal == "BUY" else current_price * 1.05
+        
+        # Prepare price data for chart
+        price_data = []
+        for idx, row in df_ticker.tail(30).iterrows():  # Last 30 days
+            price_data.append({
+                "date": idx.strftime("%Y-%m-%d"),
+                "price": float(row["Close"])
+            })
+        
+        # Prepare signals array for chart
+        signals_array = []
+        for idx, signal in signals_df["signal"].items():
+            signals_array.append(int(signal))
+        
+        # Generate predictions (simplified forecast)
+        try:
+            forecast_response = await get_forecast(ticker, model_type, 7, source)
+            forecast_data = forecast_response.body.decode() if hasattr(forecast_response, 'body') else '{}'
+            predictions = []
+            try:
+                import json
+                forecast_json = json.loads(forecast_data) if isinstance(forecast_data, str) else forecast_data
+                if 'forecast' in forecast_json:
+                    for date, data in forecast_json['forecast'].items():
+                        predictions.append({
+                            "date": date,
+                            "price": data.get('forecast', current_price)
+                        })
+            except:
+                pass
+        except:
+            predictions = []
+
         return JSONResponse({
-            "signals": signals_out.to_dict(),
+            "current_signal": current_signal,
+            "confidence": confidence,
+            "expected_return": expected_return,
+            "target_price": target_price,
+            "stop_loss": stop_loss,
+            "risk_level": risk_level,
+            "risk_score": risk_score,
+            "indicators": {
+                "rsi": current_rsi,
+                "macd": {
+                    "signal": float(current_macd.get("MACD", 0)) if hasattr(current_macd, 'get') else 0.0
+                },
+                "ma_trend": "Bullish" if float(current_price) > float(ma20) else "Bearish",
+                "ma20": ma20,
+                "volume_trend": "Normal",
+                "volume_change": 0.0
+            },
+            "price_data": price_data,
+            "signals": signals_array,
+            "predictions": predictions,
+            "raw_signals": signals_out.to_dict(),
             "pnl": pnl_out.to_dict(),
             "from_cache": False
         })
@@ -1224,9 +1792,27 @@ async def get_indicators(
 ):
     """Retrieve RSI and MACD for a ticker"""
     try:
-        # Get data from database instead of CSV
-        df_ticker = unified_handler.get_data_from_db(ticker, source)
-        if df_ticker is None or df_ticker.empty:
+        # Get data from database using the same logic as model training
+        df_ticker = pd.DataFrame()
+        
+        # Clean ticker name and try multiple variants
+        clean_ticker = ticker.replace('_yf', '').replace('_bn', '')
+        base_ticker = clean_ticker.replace('-USD', '').replace('USD', '').replace('USDT', '')
+        
+        ticker_variants = [
+            ticker, clean_ticker, f"{base_ticker}-USD", f"{base_ticker}USD", f"{base_ticker}USDT", base_ticker
+        ]
+        
+        for ticker_variant in ticker_variants:
+            try:
+                df_ticker = crypto_db.get_ohlcv_data(ticker_variant, source)
+                if not df_ticker.empty:
+                    app_logger.info(f"Found data for {ticker} using variant: {ticker_variant}")
+                    break
+            except Exception as e:
+                continue
+        
+        if df_ticker.empty:
             raise HTTPException(404, f"No data found for {ticker} in database")
         
         prices = df_ticker["Close"] if "Close" in df_ticker.columns else df_ticker["close"]
@@ -1265,18 +1851,42 @@ async def forecast_outputs(
 ):
     "Returns multiple horizons with confidence intervals and past accuracy"
     try:
-        # Get data from database
-        df = unified_handler.get_data_from_db(ticker, source=source)
-        if df is None or df.empty:
+        app_logger.info(f"Generating forecast outputs for {ticker} using {model_type} model, source={source}")
+        
+        # Get data from database using the same logic as model training
+        df = pd.DataFrame()
+        
+        # Clean ticker name and try multiple variants
+        clean_ticker = ticker.replace('_yf', '').replace('_bn', '')
+        base_ticker = clean_ticker.replace('-USD', '').replace('USD', '').replace('USDT', '')
+        
+        ticker_variants = [
+            ticker,                    # Original ticker
+            clean_ticker,             # Without source suffix
+            f"{base_ticker}-USD",     # YFinance format
+            f"{base_ticker}USD",      # Alternative format
+            f"{base_ticker}USDT",     # Binance format
+            base_ticker               # Just the base
+        ]
+        
+        for ticker_variant in ticker_variants:
+            try:
+                df = crypto_db.get_ohlcv_data(ticker_variant, source)
+                if not df.empty:
+                    app_logger.info(f"Found data for {ticker} using variant: {ticker_variant}")
+                    break
+            except Exception as e:
+                continue
+        
+        if df.empty:
             # Try to download the data if not available
             app_logger.info(f"Data not found for {ticker}, attempting to download...")
-            await unified_handler.download_and_store_data(
-                ticker=ticker,
+            df = unified_handler.download_and_store_data(
+                ticker=clean_ticker,
                 source=source,
                 period="90d",
                 interval="1d"
             )
-            df = unified_handler.get_data_from_db(ticker, source=source)
             if df is None or df.empty:
                 raise HTTPException(404, f"No data available for {ticker}")
         
@@ -1289,7 +1899,7 @@ async def forecast_outputs(
             app_logger.warning(f"Model not found for {ticker} {model_type}: {e}")
             from .model_comparison import model_comparison
             app_logger.info(f"Training {model_type} model for {ticker}...")
-            model_comparison.train_all_models([ticker], feature="Close", test_size=0.2)
+            model_comparison.train_all_models(ticker, feature="Close", test_size=0.2, source=source)
             pkl = load_model(ticker, model_type)
         
         # load and forecast for each horizon
@@ -1330,18 +1940,35 @@ async def backtest(
 ):
     "Run backtest with signals, indicators, and performance"
     try:
-        # Get data from database
-        df = unified_handler.get_data_from_db(ticker, source=source)
-        if df is None or df.empty:
+        # Get data from database using the same logic as model training
+        df = pd.DataFrame()
+        
+        # Clean ticker name and try multiple variants
+        clean_ticker = ticker.replace('_yf', '').replace('_bn', '')
+        base_ticker = clean_ticker.replace('-USD', '').replace('USD', '').replace('USDT', '')
+        
+        ticker_variants = [
+            ticker, clean_ticker, f"{base_ticker}-USD", f"{base_ticker}USD", f"{base_ticker}USDT", base_ticker
+        ]
+        
+        for ticker_variant in ticker_variants:
+            try:
+                df = crypto_db.get_ohlcv_data(ticker_variant, source)
+                if not df.empty:
+                    app_logger.info(f"Found data for {ticker} using variant: {ticker_variant}")
+                    break
+            except Exception as e:
+                continue
+        
+        if df.empty:
             # Try to download the data if not available
             app_logger.info(f"Data not found for {ticker}, attempting to download...")
-            await unified_handler.download_and_store_data(
-                ticker=ticker,
+            df = unified_handler.download_and_store_data(
+                ticker=clean_ticker,
                 source=source,
                 period="90d",
                 interval="1d"
             )
-            df = unified_handler.get_data_from_db(ticker, source=source)
             if df is None or df.empty:
                 raise HTTPException(404, f"No data available for {ticker}")
         
@@ -1354,7 +1981,7 @@ async def backtest(
             app_logger.warning(f"Model not found for {ticker} {model_type}: {e}")
             from .model_comparison import model_comparison
             app_logger.info(f"Training {model_type} model for {ticker}...")
-            model_comparison.train_all_models([ticker], feature="Close", test_size=0.2)
+            model_comparison.train_all_models(ticker, feature="Close", test_size=0.2, source=source)
             pkl = load_model(ticker, model_type)
         
         forecast_df = globals()[f'forecast_{model_type}'](pkl, periods)
@@ -1625,6 +2252,98 @@ async def get_stored_trading_signals(
 
 # ===== PIPELINE ORCHESTRATION ENDPOINTS =====
 
+@app.get("/pipeline/executions")
+async def get_pipeline_executions(
+    limit: int = Query(50, description="Maximum number of executions to return"),
+    status: str = Query(None, description="Filter by status (running, completed, failed)"),
+    pipeline_type: str = Query(None, description="Filter by pipeline type")
+):
+    """Get list of pipeline executions with filtering options"""
+    try:
+        executions = pipeline_tracker.get_pipeline_executions(
+            limit=limit,
+            status=status,
+            pipeline_type=pipeline_type
+        )
+        
+        statistics = pipeline_tracker.get_execution_statistics()
+        
+        return JSONResponse(content={
+            "success": True,
+            "executions": executions,
+            "statistics": statistics,
+            "filters": {
+                "limit": limit,
+                "status": status,
+                "pipeline_type": pipeline_type
+            },
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        app_logger.error(f"Error retrieving pipeline executions: {e}", "get_pipeline_executions")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve pipeline executions: {str(e)}")
+
+@app.get("/pipeline/execution/{trace_id}")
+async def get_pipeline_execution_details(trace_id: str):
+    """Get detailed information about a specific pipeline execution"""
+    try:
+        execution_details = pipeline_tracker.get_pipeline_execution(trace_id)
+        
+        if not execution_details:
+            raise HTTPException(status_code=404, detail=f"Pipeline execution {trace_id} not found")
+        
+        return JSONResponse(content={
+            "success": True,
+            "execution": execution_details,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        app_logger.error(f"Error retrieving pipeline execution {trace_id}: {e}", "get_pipeline_execution_details")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve pipeline execution details: {str(e)}")
+
+@app.get("/pipeline/statistics")
+async def get_pipeline_statistics():
+    """Get overall pipeline execution statistics"""
+    try:
+        statistics = pipeline_tracker.get_execution_statistics()
+        
+        # Get recent executions for trends
+        recent_executions = pipeline_tracker.get_pipeline_executions(limit=10)
+        
+        # Calculate additional metrics
+        success_trend = []
+        duration_trend = []
+        
+        for execution in recent_executions:
+            success_trend.append({
+                "timestamp": execution["start_time"],
+                "success_rate": execution["success_rate"]
+            })
+            if execution["duration_seconds"]:
+                duration_trend.append({
+                    "timestamp": execution["start_time"],
+                    "duration": execution["duration_seconds"]
+                })
+        
+        return JSONResponse(content={
+            "success": True,
+            "statistics": statistics,
+            "trends": {
+                "success_rate": success_trend,
+                "duration": duration_trend
+            },
+            "recent_executions": recent_executions,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        app_logger.error(f"Error retrieving pipeline statistics: {e}", "get_pipeline_statistics")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve pipeline statistics: {str(e)}")
+
 @app.post("/pipeline/full")
 async def run_full_pipeline(
     tickers: str = Query("TOP30", description="Comma-separated tickers or 'TOP30'"),
@@ -1635,7 +2354,8 @@ async def run_full_pipeline(
     feature: str = Query("Close", description="Feature for model training"),
     test_size: float = Query(0.2, description="Test split fraction"),
     include_eda: bool = Query(True, description="Include EDA analysis"),
-    include_clustering: bool = Query(True, description="Include clustering analysis")
+    include_clustering: bool = Query(True, description="Include clustering analysis"),
+    request: Request = None
 ):
     """
     Execute the complete cryptocurrency analysis pipeline:
@@ -1654,6 +2374,26 @@ async def run_full_pipeline(
         ticker_list = ["TOP30"] if tickers == "TOP30" else [t.strip() for t in tickers.split(",")]
         source_list = [s.strip() for s in sources.split(",")]
         
+        # Start pipeline execution tracking
+        user_agent = request.headers.get("User-Agent") if request else None
+        client_host = request.client.host if request and hasattr(request, 'client') else None
+        
+        trace_id = pipeline_tracker.start_pipeline_execution(
+            pipeline_type="full",
+            tickers=ticker_list,
+            sources=source_list,
+            period=period,
+            interval=interval,
+            max_days=max_days,
+            feature=feature,
+            test_size=test_size,
+            include_eda=include_eda,
+            include_clustering=include_clustering,
+            user_agent=user_agent,
+            ip_address=client_host
+        )
+        
+        app_logger.info(f"Pipeline execution started with trace_id: {trace_id}", "main.run_full_pipeline")
         app_logger.info(f"Parsed parameters: tickers={ticker_list}, sources={source_list}", "main.run_full_pipeline")
         app_logger.info(f"Pipeline settings: period={period}, interval={interval}, max_days={max_days}", "main.run_full_pipeline")
         app_logger.info(f"Model settings: feature={feature}, test_size={test_size}", "main.run_full_pipeline")
@@ -1670,7 +2410,8 @@ async def run_full_pipeline(
             feature=feature,
             test_size=test_size,
             include_eda=include_eda,
-            include_clustering=include_clustering
+            include_clustering=include_clustering,
+            trace_id=trace_id
         )
         
         if pipeline is None:
@@ -1695,9 +2436,16 @@ async def run_full_pipeline(
         if 'error' in results and results.get('status') == 'rejected':
             raise HTTPException(status_code=409, detail=results['error'])
         
+        # Enhance the response with frontend-compatible data structure
+        enhanced_results = await enhance_pipeline_results(results)
+        
         return JSONResponse(content={
             "message": "Full cryptocurrency analysis pipeline completed",
-            "pipeline_results": results
+            "pipeline_results": results,
+            "enhanced_results": enhanced_results,  # Add enhanced data for frontend
+            "trace_id": trace_id,  # Include trace ID for tracking
+            "success": True,
+            "timestamp": datetime.now().isoformat()
         })
         
     except Exception as e:
@@ -1841,12 +2589,12 @@ async def model_status(ticker: str):
       {
         "arima": true,
         "sarima": false,
-        "rf": true,
-        "xgb": false,
+        "random_forest": true,
+        "xgboost": false,
         "lstm": true
       }
     """
-    types = ["arima", "sarima", "rf", "xgb", "lstm"]
+    types = ["arima", "sarima", "random_forest", "xgboost", "lstm"]
     status = {
         t: os.path.exists(os.path.join(MODEL_DIR, f"{ticker}_{t}.pkl"))
         for t in types

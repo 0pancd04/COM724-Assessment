@@ -1,5 +1,6 @@
 import os
 import pickle
+import joblib
 import numpy as np
 import pandas as pd
 from datetime import timedelta
@@ -10,8 +11,13 @@ MODEL_DIR = "models"
 
 def load_model(ticker: str, model_type: str):
     path = os.path.join(MODEL_DIR, f"{ticker}_{model_type}.pkl")
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    try:
+        # Try joblib first (used by model_comparison.py)
+        return joblib.load(path)
+    except Exception:
+        # Fallback to pickle (used by predictive_modeling.py)
+        with open(path, "rb") as f:
+            return pickle.load(f)
 
 # Forecast with confidence intervals for ARIMA/SARIMA
 

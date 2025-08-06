@@ -22,6 +22,7 @@ from .model_comparison import model_comparison
 from .websocket_manager import ws_manager
 from .analysis_storage import analysis_storage
 from .enhanced_storage import enhanced_storage
+from .pipeline_execution_tracker import pipeline_tracker
 
 # Setup enhanced logging
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -246,6 +247,50 @@ class DimensionalityReductionStep(PipelineStep):
             self.fail(str(e))
             raise
 
+class CorrelationAnalysisStep(PipelineStep):
+    """Step for correlation analysis"""
+    
+    def __init__(self, tickers: list = None, feature: str = "Close", source: str = 'yfinance', use_database: bool = True):
+        super().__init__("Correlation Analysis")
+        self.tickers = tickers or ["BTC", "ETH", "ADA", "DOT"]
+        self.feature = feature
+        self.source = source
+        self.use_database = use_database
+    
+    async def execute(self) -> Dict:
+        self.start()
+        try:
+            output_file = "data/correlation_matrix.csv"
+            chart_file = "data/correlation_chart.json"
+            
+            corr_df, report, fig = perform_correlation_analysis(
+                preprocessed_file=None,
+                selected_tickers=self.tickers,
+                feature=self.feature,
+                output_file=output_file,
+                chart_file=chart_file,
+                use_database=self.use_database,
+                source=self.source
+            )
+            
+            logger.info("Correlation analysis results stored in database")
+            
+            result = {
+                'output_file': output_file,
+                'chart_file': chart_file,
+                'correlation_matrix': corr_df.to_dict(),
+                'report': report,
+                'tickers': self.tickers,
+                'feature': self.feature
+            }
+            
+            self.complete(result)
+            return result
+            
+        except Exception as e:
+            self.fail(str(e))
+            raise
+
 class ConditionalDimensionalityReductionStep(PipelineStep):
     """Conditional step for dimensionality reduction that checks if input exists"""
     
@@ -389,11 +434,13 @@ class ModelTrainingStep(PipelineStep):
 class PipelineOrchestrator:
     """Main orchestrator for the complete cryptocurrency analysis pipeline"""
     
-    def __init__(self):
+    def __init__(self, trace_id: str = None):
         self.steps = []
         self.results = {}
         self.start_time = None
         self.end_time = None
+        self.trace_id = trace_id  # Add trace ID for tracking
+        logger.info(f"Pipeline orchestrator initialized with trace_id: {trace_id}", "PipelineOrchestrator")
     
     def add_step(self, step: PipelineStep):
         """Add a step to the pipeline"""
@@ -401,12 +448,12 @@ class PipelineOrchestrator:
     
     async def execute_pipeline(self) -> Dict:
         """Execute the complete pipeline with WebSocket updates"""
-        logger.info("Starting pipeline execution", "PipelineOrchestrator")
+        logger.info(f"Starting pipeline execution with trace_id: {self.trace_id}", "PipelineOrchestrator")
         
         self.start_time = datetime.now()
-        pipeline_id = f"pipeline_{int(self.start_time.timestamp())}"
+        pipeline_id = self.trace_id or f"pipeline_{int(self.start_time.timestamp())}"
         
-        logger.info(f"Generated pipeline_id: {pipeline_id}", "PipelineOrchestrator")
+        logger.info(f"Using pipeline_id: {pipeline_id}", "PipelineOrchestrator")
         logger.info(f"Pipeline has {len(self.steps)} steps defined", "PipelineOrchestrator")
         
         # Check if there are any steps to execute
@@ -452,16 +499,27 @@ class PipelineOrchestrator:
             
             for i, step in enumerate(self.steps, 1):
                 logger.info(f"Processing step {i}/{len(self.steps)}: {step.name}", "PipelineOrchestrator")
+                
+                # Start step tracking
+                step_input_data = {
+                    'step_type': type(step).__name__,
+                    'step_config': {k: v for k, v in step.__dict__.items() 
+                                   if not k.startswith('_') and k not in ['start_time', 'end_time', 'result', 'error']}
+                }
+                
+                step_id = None
+                if self.trace_id:
+                    step_id = pipeline_tracker.start_step_execution(
+                        trace_id=self.trace_id,
+                        step_name=step.name,
+                        step_type=type(step).__name__,
+                        step_order=i,
+                        input_data=step_input_data
+                    )
+                
                 try:
                     # Update WebSocket with current step
                     await ws_manager.update_step(step.name, i, f"Starting {step.name}")
-                    
-                    # Store step start in enhanced storage
-                    step_input_data = {
-                        'step_type': type(step).__name__,
-                        'step_config': {k: v for k, v in step.__dict__.items() 
-                                       if not k.startswith('_') and k not in ['start_time', 'end_time', 'result', 'error']}
-                    }
                     
                     logger.info(f"[PipelineOrchestrator.execute_pipeline] Executing step {i}/{len(self.steps)}: {step.name} ({type(step).__name__})")
                     result = await step.execute()
@@ -493,6 +551,17 @@ class PipelineOrchestrator:
                     }
                     pipeline_results['summary']['completed'] += 1
                     
+                    # Complete step tracking
+                    if step_id and self.trace_id:
+                        pipeline_tracker.complete_step_execution(
+                            step_id=step_id,
+                            status="completed",
+                            output_data=result if isinstance(result, dict) else {"result": str(result)},
+                            records_processed=getattr(step, 'records_processed', 0),
+                            records_created=getattr(step, 'records_created', 0),
+                            files_created=getattr(step, 'files_created', [])
+                        )
+                    
                 except Exception as e:
                     pipeline_results['steps'][step.name] = {
                         'status': step.status,
@@ -500,6 +569,14 @@ class PipelineOrchestrator:
                         'duration': (step.end_time - step.start_time).total_seconds() if step.end_time else None
                     }
                     pipeline_results['summary']['failed'] += 1
+                    
+                    # Complete step tracking with failure
+                    if step_id and self.trace_id:
+                        pipeline_tracker.complete_step_execution(
+                            step_id=step_id,
+                            status="failed",
+                            error_message=str(e)
+                        )
                     
                     # Update WebSocket with error
                     await ws_manager.update_step(step.name, i, f"Failed: {str(e)}")
@@ -578,6 +655,13 @@ class PipelineOrchestrator:
                 f"Pipeline completed: {pipeline_results['summary']['completed']} steps succeeded, "
                 f"{pipeline_results['summary']['failed']} steps failed (Success rate: {success_rate:.1%})")
             
+            # Complete pipeline tracking
+            if self.trace_id:
+                pipeline_tracker.complete_pipeline_execution(
+                    trace_id=self.trace_id,
+                    status="completed" if success else "failed"
+                )
+            
             logger.info(f"Pipeline completed in {pipeline_results['total_duration']:.2f}s")
             return pipeline_results
             
@@ -592,6 +676,18 @@ class PipelineOrchestrator:
                 logger.error(f"Pipeline steps: {[step.name for step in self.steps]}", "PipelineOrchestrator")
                 logger.error(f"Pipeline start time: {self.start_time}", "PipelineOrchestrator")
                 logger.error(f"Pipeline end time: {self.end_time}", "PipelineOrchestrator")
+            
+            # Complete pipeline tracking with failure
+            if self.trace_id:
+                error_step = None
+                if "division by zero" in str(e).lower():
+                    error_step = "calculation"
+                pipeline_tracker.complete_pipeline_execution(
+                    trace_id=self.trace_id,
+                    status="failed",
+                    error_message=str(e),
+                    error_step=error_step
+                )
             
             # Ensure we end the pipeline properly even if there's an error
             try:
@@ -613,7 +709,8 @@ class PipelineFactory:
                            feature: str = "Close",
                            test_size: float = 0.2,
                            include_eda: bool = True,
-                           include_clustering: bool = True) -> PipelineOrchestrator:
+                           include_clustering: bool = True,
+                           trace_id: str = None) -> PipelineOrchestrator:
         """
         Create a complete analysis pipeline
         
@@ -636,11 +733,15 @@ class PipelineFactory:
         if sources is None:
             sources = ["yfinance", "binance"]
         
+        # Add 5-year option
+        if period == "5y":
+            period = "1825d"
+        
         logger.info(f"Pipeline config: tickers={tickers}, sources={sources}, period={period}, interval={interval}", "PipelineFactory")
         logger.info(f"Pipeline options: max_days={max_days}, feature={feature}, test_size={test_size}", "PipelineFactory")
         logger.info(f"Pipeline flags: include_eda={include_eda}, include_clustering={include_clustering}", "PipelineFactory")
         
-        orchestrator = PipelineOrchestrator()
+        orchestrator = PipelineOrchestrator(trace_id=trace_id)
         initial_step_count = 0
         
         # Step 1: Data Download
@@ -677,6 +778,18 @@ class PipelineFactory:
                 ))
                 break  # Only use one source for clustering
         
+        # Step 4.5: Correlation Analysis (for sample tickers)
+        correlation_tickers = tickers if tickers != ["TOP30"] else ["BTC", "ETH", "ADA", "DOT"]
+        if len(correlation_tickers) >= 2:  # Need at least 2 tickers for correlation
+            logger.info(f"Adding CorrelationAnalysisStep for tickers: {correlation_tickers[:4]}", "PipelineFactory")
+            orchestrator.add_step(CorrelationAnalysisStep(
+                tickers=correlation_tickers[:4],  # Limit to 4 tickers
+                feature=feature,
+                source=sources[0] if sources else 'yfinance',  # Use first source
+                use_database=True
+            ))
+            initial_step_count += 1
+        
         # Step 5: Model Training (for specific tickers or sample from TOP30)
         training_tickers = tickers if tickers != ["TOP30"] else ["BTC", "ETH", "ADA"]  # Sample tickers
         logger.info(f"Adding ModelTrainingStep for tickers: {training_tickers}", "PipelineFactory")
@@ -705,13 +818,14 @@ class PipelineFactory:
                                          period: str = "90d",
                                          interval: str = "1d",
                                          feature: str = "Close",
-                                         test_size: float = 0.2) -> PipelineOrchestrator:
+                                         test_size: float = 0.2,
+                                         trace_id: str = None) -> PipelineOrchestrator:
         """Create a simple download and train pipeline"""
         
         if sources is None:
             sources = ["yfinance"]
         
-        orchestrator = PipelineOrchestrator()
+        orchestrator = PipelineOrchestrator(trace_id=trace_id)
         
         # Download data
         orchestrator.add_step(DataDownloadStep(tickers, sources, period, interval))
@@ -723,13 +837,14 @@ class PipelineFactory:
     
     @staticmethod
     def create_preprocessing_pipeline(sources: List[str] = None,
-                                    max_days: int = 90) -> PipelineOrchestrator:
+                                    max_days: int = 90,
+                                    trace_id: str = None) -> PipelineOrchestrator:
         """Create a preprocessing-only pipeline"""
         
         if sources is None:
             sources = ["yfinance", "binance"]
         
-        orchestrator = PipelineOrchestrator()
+        orchestrator = PipelineOrchestrator(trace_id=trace_id)
         
         for source in sources:
             orchestrator.add_step(DataPreprocessingStep(source, max_days))

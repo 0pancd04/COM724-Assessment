@@ -13,26 +13,33 @@ const ModelComparison = () => {
   const [forecasts, setForecasts] = useState(null);
   const [selectedModel, setSelectedModel] = useState('arima');
   const [forecastPeriods, setForecastPeriods] = useState(7);
+  const [dataSource, setDataSource] = useState('yfinance');
+  const [historyLength, setHistoryLength] = useState('90d');
   
   const models = [
     { id: 'arima', name: 'ARIMA', color: '#3b82f6', description: 'Auto-Regressive Integrated Moving Average' },
     { id: 'sarima', name: 'SARIMA', color: '#10b981', description: 'Seasonal ARIMA' },
-    { id: 'rf', name: 'Random Forest', color: '#f59e0b', description: 'Ensemble Learning' },
-    { id: 'xgb', name: 'XGBoost', color: '#ef4444', description: 'Gradient Boosting' },
+    { id: 'random_forest', name: 'Random Forest', color: '#f59e0b', description: 'Ensemble Learning' },
+    { id: 'xgboost', name: 'XGBoost', color: '#ef4444', description: 'Gradient Boosting' },
   ];
   
   useEffect(() => {
     if (selectedTicker) {
       loadModelData();
     }
-  }, [selectedTicker]);
+  }, [selectedTicker, dataSource]);
   
   const loadModelData = async () => {
     setLoading(true);
     try {
       // Try to get existing model metrics
       const response = await axios.get(`${API_ENDPOINTS.TRAIN(selectedTicker)}`, {
-        params: { feature: 'Close', test_size: 0.2 }
+        params: { 
+          feature: 'Close', 
+          test_size: 0.2,
+          source: dataSource,
+          history_length: historyLength
+        }
       });
       
       if (response.data && response.data.metrics) {
@@ -56,7 +63,8 @@ const ModelComparison = () => {
         params: { 
           feature: 'Close', 
           test_size: 0.2,
-          source: 'yfinance'
+          source: dataSource,
+          history_length: historyLength
         },
         timeout: 60000 // 60 second timeout for training
       });
@@ -85,7 +93,7 @@ const ModelComparison = () => {
         params: {
           model_type: selectedModel,
           periods: forecastPeriods,
-          source: 'yfinance'
+          source: dataSource
         }
       });
       
@@ -112,16 +120,18 @@ const ModelComparison = () => {
     plotOptions: {
       bar: {
         horizontal: true,
-        distributed: true,
+        distributed: false,
         barHeight: '70%',
       }
     },
-    colors: models.map(m => m.color),
+    colors: models.map(m => m.color), // Colors for each model
     xaxis: {
-      categories: ['MAE', 'RMSE', 'MAPE', 'R²'],
+      categories: ['MAE', 'RMSE', 'MAPE', 'R²'], // Metrics on x-axis
       labels: {
-        formatter: (val) => typeof val === 'number' ? val.toFixed(4) : val
-      }
+        formatter: (val) => typeof val === 'number' ? val.toFixed(2) : val
+      },
+      min: 0,
+      forceNiceScale: true
     },
     yaxis: {
       labels: {
@@ -129,6 +139,28 @@ const ModelComparison = () => {
           fontSize: '12px',
           fontWeight: 600,
         }
+      }
+    },
+    grid: {
+      show: true,
+      borderColor: '#e0e0e0',
+      strokeDashArray: 3,
+      position: 'back',
+      xaxis: {
+        lines: {
+          show: true
+        }
+      },
+      yaxis: {
+        lines: {
+          show: true
+        }
+      },
+      padding: {
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0
       }
     },
     title: {
@@ -140,11 +172,7 @@ const ModelComparison = () => {
       }
     },
     dataLabels: {
-      enabled: true,
-      formatter: (val) => typeof val === 'number' ? val.toFixed(4) : val,
-      style: {
-        fontSize: '12px',
-      }
+      enabled: false,  // Disable data labels by default
     },
     legend: {
       show: true,
@@ -152,30 +180,47 @@ const ModelComparison = () => {
     },
     theme: {
       mode: 'light',
+    },
+    tooltip: {
+      enabled: true,
+      shared: false,
+      intersect: true,
+      followCursor: true,
+      theme: 'dark',
+      y: {
+        formatter: (val) => val.toFixed(4)
+      }
     }
   });
   
   const getMetricsChartSeries = () => {
     if (!modelMetrics) return [];
     
-    return [
-      {
-        name: 'MAE',
-        data: models.map(m => modelMetrics[m.id]?.mae || 0)
-      },
-      {
-        name: 'RMSE', 
-        data: models.map(m => modelMetrics[m.id]?.rmse || 0)
-      },
-      {
-        name: 'MAPE',
-        data: models.map(m => modelMetrics[m.id]?.mape || 0)
-      },
-      {
-        name: 'R²',
-        data: models.map(m => modelMetrics[m.id]?.r2 || 0)
+    console.log('Model metrics:', modelMetrics); // Debug log
+    
+    // For horizontal bar chart, we need one series per model
+    return models.map(model => {
+      const metrics = modelMetrics[model.id];
+      if (!metrics) {
+        console.log(`No metrics found for ${model.name}`);
+        return {
+          name: model.name,
+          data: [0, 0, 0, 0] // MAE, RMSE, MAPE, R²
+        };
       }
-    ];
+      
+      console.log(`${model.name} metrics:`, metrics);
+      
+      return {
+        name: model.name,
+        data: [
+          metrics.mae || 0,
+          metrics.rmse || 0,
+          metrics.mape || 0,
+          metrics.r2 || 0
+        ]
+      };
+    });
   };
   
   // Prepare forecast chart
@@ -249,6 +294,25 @@ const ModelComparison = () => {
           <span className="px-4 py-2 glass-card text-sm font-semibold">
             {selectedTicker}
           </span>
+          <select
+            value={dataSource}
+            onChange={(e) => setDataSource(e.target.value)}
+            className="px-4 py-2 glass-dropdown text-sm font-semibold"
+          >
+            <option value="yfinance">📊 YFinance</option>
+            <option value="binance">🔶 Binance</option>
+          </select>
+          <select
+            value={historyLength}
+            onChange={(e) => setHistoryLength(e.target.value)}
+            className="px-4 py-2 glass-dropdown text-sm font-semibold"
+          >
+            <option value="90d">90 Days</option>
+            <option value="180d">180 Days</option>
+            <option value="365d">1 Year</option>
+            <option value="730d">2 Years</option>
+            <option value="1825d">5 Years</option>
+          </select>
           <button
             onClick={trainModels}
             disabled={training}
@@ -301,9 +365,27 @@ const ModelComparison = () => {
                     </span>
                   </div>
                   <div>
+                    <span className="text-gray-500">RMSE:</span>
+                    <span className="ml-1 font-semibold">
+                      {modelMetrics[model.id].rmse?.toFixed(4)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">MAPE:</span>
+                    <span className="ml-1 font-semibold">
+                      {modelMetrics[model.id].mape?.toFixed(4)}
+                    </span>
+                  </div>
+                  <div>
                     <span className="text-gray-500">R²:</span>
                     <span className="ml-1 font-semibold">
                       {modelMetrics[model.id].r2?.toFixed(4)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Direction Accuracy:</span>
+                    <span className="ml-1 font-semibold">
+                      {modelMetrics[model.id].direction_accuracy?.toFixed(2)}%
                     </span>
                   </div>
                 </div>

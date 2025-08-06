@@ -81,33 +81,43 @@ const EDAVisualization = () => {
     }
   };
   
-  // Chart configurations with glassmorphism styling
-  const getChartOptions = (type) => {
-    const baseOptions = {
-      chart: {
-        toolbar: {
-          show: true,
-          tools: {
-            download: true,
-            selection: true,
-            zoom: true,
-            zoomin: true,
-            zoomout: true,
-            pan: true,
-          }
-        },
-        background: 'transparent',
-        fontFamily: 'Inter, sans-serif',
+  // Base chart options with glassmorphism styling
+  const baseOptions = {
+    chart: {
+      toolbar: {
+        show: true,
+        tools: {
+          download: true,
+          selection: true,
+          zoom: true,
+          zoomin: true,
+          zoomout: true,
+          pan: true,
+        }
       },
-      theme: {
-        mode: 'light',
-        palette: 'palette2'
-      },
-      grid: {
-        borderColor: '#e0e0e0',
-        strokeDashArray: 4,
+      background: 'transparent',
+      fontFamily: 'Inter, sans-serif',
+      foreColor: '#374151', // Default dark gray for better contrast
+    },
+    theme: {
+      mode: 'light',
+      palette: 'palette2'
+    },
+    grid: {
+      borderColor: '#e5e7eb',
+      strokeDashArray: 4,
+    },
+    tooltip: {
+      theme: 'light',
+      style: {
+        fontSize: '12px',
+        color: '#1f2937'
       }
-    };
+    }
+  };
+
+  // Chart configurations
+  const getChartOptions = (type) => {
     
     switch(type) {
       case 'candlestick':
@@ -133,22 +143,109 @@ const EDAVisualization = () => {
       case 'volume':
         return {
           ...baseOptions,
-          chart: { ...baseOptions.chart, type: 'bar', height: 200 },
-          title: { text: 'Trading Volume', align: 'left' },
-          xaxis: { type: 'datetime' },
+          chart: { 
+            ...baseOptions.chart, 
+            type: 'bar', 
+            height: 300,
+            foreColor: '#374151' // Dark gray for better contrast on white background
+          },
+          title: { 
+            text: 'Trading Volume', 
+            align: 'left',
+            style: {
+              color: '#1f2937',
+              fontSize: '16px',
+              fontWeight: 'bold'
+            }
+          },
+          xaxis: { 
+            type: 'datetime',
+            labels: {
+              style: {
+                colors: '#374151'
+              }
+            }
+          },
           yaxis: {
-            labels: { formatter: (val) => `${(val / 1e6).toFixed(1)}M` }
+            labels: { 
+              formatter: (val) => {
+                if (val >= 1e9) return `${(val / 1e9).toFixed(1)}B`;
+                if (val >= 1e6) return `${(val / 1e6).toFixed(1)}M`;
+                if (val >= 1e3) return `${(val / 1e3).toFixed(1)}K`;
+                return val?.toFixed(0);
+              },
+              style: {
+                colors: ['#374151']
+              }
+            }
+          },
+          plotOptions: {
+            bar: {
+              borderRadius: 2,
+              columnWidth: '60%'
+            }
+          },
+          states: {
+            hover: {
+              filter: {
+                type: 'lighten',
+                value: 0.15
+              }
+            },
+            active: {
+              allowMultipleDataPointsSelection: false,
+              filter: {
+                type: 'darken',
+                value: 0.7
+              }
+            }
+          },
+          dataLabels: {
+            enabled: false // Disable persistent labels for cleaner look
+          },
+          tooltip: {
+            theme: 'light',
+            style: {
+              fontSize: '12px',
+              color: '#1f2937'
+            },
+            y: {
+              formatter: (val) => {
+                if (val >= 1e9) return `${(val / 1e9).toFixed(2)}B`;
+                if (val >= 1e6) return `${(val / 1e6).toFixed(2)}M`;
+                if (val >= 1e3) return `${(val / 1e3).toFixed(2)}K`;
+                return val?.toLocaleString();
+              },
+              title: {
+                formatter: () => 'Volume: '
+              }
+            },
+            x: {
+              format: 'dd MMM yyyy'
+            }
           },
           colors: ['#8b5cf6'],
           fill: {
             type: 'gradient',
             gradient: {
-              shade: 'dark',
+              shade: 'light',
               type: 'vertical',
-              shadeIntensity: 0.5,
+              shadeIntensity: 0.3,
               inverseColors: false,
-              opacityFrom: 0.8,
-              opacityTo: 0.3,
+              opacityFrom: 0.9,
+              opacityTo: 0.4,
+              colorStops: [
+                {
+                  offset: 0,
+                  color: '#8b5cf6',
+                  opacity: 0.9
+                },
+                {
+                  offset: 100,
+                  color: '#a78bfa',
+                  opacity: 0.4
+                }
+              ]
             }
           }
         };
@@ -168,8 +265,25 @@ const EDAVisualization = () => {
       case 'volatility':
         return {
           ...baseOptions,
-          chart: { ...baseOptions.chart, type: 'area', height: 300 },
-          title: { text: 'Price Volatility (20-day)', align: 'left' },
+          chart: { 
+            ...baseOptions.chart, 
+            type: 'area', 
+            height: 300,
+            animations: {
+              enabled: true,
+              easing: 'easeinout',
+              speed: 800
+            }
+          },
+          title: { 
+            text: 'Price Volatility (20-day)', 
+            align: 'left',
+            style: {
+              fontSize: '16px',
+              fontWeight: 'bold',
+              color: '#1f2937'
+            }
+          },
           fill: {
             type: 'gradient',
             gradient: {
@@ -179,9 +293,54 @@ const EDAVisualization = () => {
               stops: [0, 90, 100]
             }
           },
-          stroke: { curve: 'smooth', width: 2 },
-          xaxis: { type: 'datetime' },
-          yaxis: { labels: { formatter: (val) => `${val?.toFixed(1)}%` } },
+          stroke: { 
+            curve: 'smooth', 
+            width: 2,
+            lineCap: 'round'
+          },
+          markers: {
+            size: 0,
+            hover: {
+              size: 5,
+              sizeOffset: 3
+            }
+          },
+          xaxis: { 
+            type: 'datetime',
+            labels: {
+              style: {
+                colors: '#4b5563',
+                fontSize: '12px'
+              }
+            }
+          },
+          yaxis: { 
+            labels: { 
+              formatter: (val) => `${val?.toFixed(2)}%`,
+              style: {
+                colors: '#4b5563',
+                fontSize: '12px'
+              }
+            }
+          },
+          tooltip: {
+            theme: 'light',
+            x: {
+              format: 'dd MMM yyyy'
+            },
+            y: {
+              formatter: (val) => `${val?.toFixed(2)}%`,
+              title: {
+                formatter: () => 'Volatility: '
+              }
+            },
+            marker: {
+              show: true
+            }
+          },
+          dataLabels: {
+            enabled: false // This disables the permanent labels
+          },
           colors: ['#ef4444']
         };
         
@@ -205,11 +364,16 @@ const EDAVisualization = () => {
         }];
         
       case 'volume':
+        // Optimize volume data by sampling if dataset is large
+        const volumeData = rawData.length > 100 ? 
+          rawData.filter((_, index) => index % Math.ceil(rawData.length / 100) === 0) : 
+          rawData;
+        
         return [{
           name: 'Volume',
-          data: rawData.map(item => ({
+          data: volumeData.map(item => ({
             x: new Date(item.timestamp),
-            y: item.volume
+            y: Number(item.volume) || 0
           }))
         }];
         
@@ -243,11 +407,11 @@ const EDAVisualization = () => {
     for (let i = period - 1; i < data.length; i++) {
       let sum = 0;
       for (let j = 0; j < period; j++) {
-        sum += data[i - j].close;
+        sum += Number(data[i - j].close) || 0;
       }
       result.push({
         x: new Date(data[i].timestamp),
-        y: sum / period
+        y: Number((sum / period).toFixed(2))
       });
     }
     return result;
@@ -268,7 +432,7 @@ const EDAVisualization = () => {
       
       result.push({
         x: new Date(data[i + 1].timestamp),
-        y: stdDev
+        y: Number(stdDev.toFixed(2))
       });
     }
     return result;
@@ -279,8 +443,8 @@ const EDAVisualization = () => {
     { id: 'volume', name: '📊 Volume', icon: '📊', gradient: 'gradient-purple', description: 'Trading volume analysis' },
     { id: 'moving_avg', name: '📉 Moving Averages', icon: '📈', gradient: 'gradient-green', description: '7, 20, and 50-day moving averages' },
     { id: 'volatility', name: '🌊 Volatility', icon: '📊', gradient: 'gradient-orange', description: '20-day rolling volatility' },
-    { id: 'distribution', name: '📊 Distribution', icon: '📈', gradient: 'gradient-red', description: 'Price distribution histograms' },
-    { id: 'correlation', name: '🔗 Correlations', icon: '📊', gradient: 'gradient-teal', description: 'Feature correlation analysis' },
+    { id: 'distribution', name: '📊 Distribution', icon: '📈', gradient: 'from-pink-500 to-rose-500', description: 'Price distribution histograms' },
+    { id: 'correlation', name: '🔗 Correlations', icon: '📊', gradient: 'from-cyan-500 to-blue-500', description: 'Feature correlation analysis' },
   ];
   
   return (
@@ -354,12 +518,23 @@ const EDAVisualization = () => {
           )}
           
           {activeChart === 'volume' && (
-            <ReactApexChart
-              options={getChartOptions('volume')}
-              series={generateChartSeries('volume')}
-              type="bar"
-              height={300}
-            />
+            <div className="relative">
+              {rawData && rawData.length > 0 ? (
+                <ReactApexChart
+                  options={getChartOptions('volume')}
+                  series={generateChartSeries('volume')}
+                  type="bar"
+                  height={350}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-72">
+                  <div className="text-center">
+                    <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                    <p className="text-gray-600">Loading volume data...</p>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
           
           {activeChart === 'moving_avg' && (
@@ -372,66 +547,197 @@ const EDAVisualization = () => {
           )}
           
           {activeChart === 'volatility' && (
-            <ReactApexChart
-              options={getChartOptions('volatility')}
-              series={generateChartSeries('volatility')}
-              type="area"
-              height={300}
-            />
+            <div className="relative">
+              {rawData && rawData.length > 0 ? (
+                <ReactApexChart
+                  options={getChartOptions('volatility')}
+                  series={generateChartSeries('volatility')}
+                  type="area"
+                  height={300}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-72">
+                  <div className="text-center">
+                    <div className="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                    <p className="text-gray-600">Calculating volatility...</p>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
           
           {activeChart === 'distribution' && rawData && (
             <div className="space-y-4">
-              <h4 className="text-lg font-semibold text-gradient">Price Distribution Analysis</h4>
+              <h4 className="text-lg font-semibold text-gray-800">Price Distribution Analysis</h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <ReactApexChart
-                  options={{
-                    chart: { type: 'histogram', toolbar: { show: true } },
-                    title: { text: 'Close Price Distribution' },
-                    xaxis: { title: { text: 'Price ($)' } },
-                    yaxis: { title: { text: 'Frequency' } },
-                    colors: ['#3b82f6']
-                  }}
-                  series={[{
-                    name: 'Frequency',
-                    data: rawData.map(item => item.close)
-                  }]}
-                  type="histogram"
-                  height={300}
-                />
-                <ReactApexChart
-                  options={{
-                    chart: { type: 'boxPlot', toolbar: { show: true } },
-                    title: { text: 'OHLC Box Plot' },
-                    xaxis: { categories: ['Open', 'High', 'Low', 'Close'] },
-                    colors: ['#10b981']
-                  }}
-                  series={[{
-                    name: 'OHLC',
-                    data: [
-                      { x: 'Open', y: rawData.map(item => item.open) },
-                      { x: 'High', y: rawData.map(item => item.high) },
-                      { x: 'Low', y: rawData.map(item => item.low) },
-                      { x: 'Close', y: rawData.map(item => item.close) }
-                    ]
-                  }]}
-                  type="boxPlot"
-                  height={300}
-                />
+                <div className="glass-card p-4">
+                  <ReactApexChart
+                    options={{
+                      ...baseOptions,
+                      chart: { 
+                        ...baseOptions.chart, 
+                        type: 'bar',
+                        toolbar: { show: true },
+                        foreColor: '#374151'
+                      },
+                      title: { 
+                        text: 'Close Price Distribution',
+                        style: {
+                          fontSize: '14px',
+                          fontWeight: 'bold',
+                          color: '#1f2937'
+                        }
+                      },
+                      xaxis: { 
+                        title: { 
+                          text: 'Price ($)',
+                          style: {
+                            fontSize: '12px',
+                            color: '#4b5563'
+                          }
+                        },
+                        labels: {
+                          style: {
+                            colors: '#4b5563'
+                          }
+                        }
+                      },
+                      yaxis: { 
+                        title: { 
+                          text: 'Frequency',
+                          style: {
+                            fontSize: '12px',
+                            color: '#4b5563'
+                          }
+                        },
+                        labels: {
+                          style: {
+                            colors: '#4b5563'
+                          }
+                        }
+                      },
+                      colors: ['#ec4899'],
+                      plotOptions: {
+                        bar: {
+                          borderRadius: 2,
+                          columnWidth: '90%',
+                          dataLabels: {
+                            position: 'top'
+                          }
+                        }
+                      },
+                      dataLabels: {
+                        enabled: false
+                      },
+                      tooltip: {
+                        theme: 'light',
+                        y: {
+                          title: {
+                            formatter: () => 'Frequency: '
+                          }
+                        },
+                        x: {
+                          formatter: (val) => `$${val?.toFixed(2)}`
+                        }
+                      }
+                    }}
+                    series={[{
+                      name: 'Close Price',
+                      data: rawData.map(item => parseFloat(item.close))
+                    }]}
+                    type="bar"
+                    height={300}
+                  />
+                </div>
+                <div className="glass-card p-4">
+                  <ReactApexChart
+                    options={{
+                      ...baseOptions,
+                      chart: { 
+                        ...baseOptions.chart, 
+                        type: 'boxPlot', 
+                        toolbar: { show: true },
+                        foreColor: '#374151'
+                      },
+                      title: { 
+                        text: 'OHLC Box Plot',
+                        style: {
+                          fontSize: '14px',
+                          fontWeight: 'bold',
+                          color: '#1f2937'
+                        }
+                      },
+                      xaxis: { 
+                        categories: ['Open', 'High', 'Low', 'Close'],
+                        labels: {
+                          style: {
+                            colors: '#4b5563',
+                            fontSize: '12px'
+                          }
+                        }
+                      },
+                      yaxis: {
+                        labels: {
+                          formatter: (val) => `$${val?.toFixed(2)}`,
+                          style: {
+                            colors: '#4b5563'
+                          }
+                        }
+                      },
+                      plotOptions: {
+                        boxPlot: {
+                          colors: {
+                            upper: '#10b981',
+                            lower: '#ef4444'
+                          }
+                        }
+                      },
+                      tooltip: {
+                        theme: 'light',
+                        custom: function({ seriesIndex, dataPointIndex, w }) {
+                          const data = w.globals.initialSeries[seriesIndex].data[dataPointIndex];
+                          return `
+                            <div class="px-3 py-2">
+                              <div class="text-sm font-medium text-gray-900">${data.x}</div>
+                              <div class="text-xs text-gray-600">
+                                <div>Upper Whisker: $${data.y[3]?.toFixed(2)}</div>
+                                <div>Upper Quartile: $${data.y[2]?.toFixed(2)}</div>
+                                <div>Median: $${data.y[1]?.toFixed(2)}</div>
+                                <div>Lower Quartile: $${data.y[0]?.toFixed(2)}</div>
+                                <div>Lower Whisker: $${data.y[4]?.toFixed(2)}</div>
+                              </div>
+                            </div>
+                          `;
+                        }
+                      }
+                    }}
+                    series={[{
+                      name: 'OHLC',
+                      data: [
+                        { x: 'Open', y: rawData.map(item => parseFloat(item.open)) },
+                        { x: 'High', y: rawData.map(item => parseFloat(item.high)) },
+                        { x: 'Low', y: rawData.map(item => parseFloat(item.low)) },
+                        { x: 'Close', y: rawData.map(item => parseFloat(item.close)) }
+                      ]
+                    }]}
+                    type="boxPlot"
+                    height={300}
+                  />
+                </div>
               </div>
             </div>
           )}
           
           {activeChart === 'correlation' && (
-            <div className="text-center p-8">
+            <div className="text-center p-8 glass-card">
               <div className="text-4xl mb-4">🔗</div>
-              <h4 className="text-lg font-semibold text-gradient mb-2">Correlation Analysis</h4>
+              <h4 className="text-lg font-semibold text-gray-800 mb-2">Correlation Analysis</h4>
               <p className="text-gray-600 mb-4">
                 Feature correlation analysis will be displayed here once comprehensive EDA is run.
               </p>
               <button
                 onClick={loadEDAData}
-                className="px-6 py-3 gradient-teal text-white rounded-lg hover:shadow-lg transition-all duration-300"
+                className="px-6 py-3 bg-gradient-to-r from-cyan-500 to-blue-500 text-white rounded-lg hover:shadow-lg transition-all duration-300"
               >
                 Run Full EDA Analysis
               </button>
@@ -451,7 +757,10 @@ const EDAVisualization = () => {
                   {key.replace(/_/g, ' ')}
                 </p>
                 <p className="text-2xl font-bold text-gradient">
-                  {typeof value === 'number' ? value.toFixed(2) : value}
+                  {typeof value === 'number' ? value.toFixed(2) : 
+                   typeof value === 'object' && value !== null ? 
+                     (value.start && value.end ? `${value.start} to ${value.end}` : JSON.stringify(value)) : 
+                   value}
                 </p>
               </div>
             ))}

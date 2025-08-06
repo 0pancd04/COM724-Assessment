@@ -3,20 +3,22 @@ import ReactApexChart from 'react-apexcharts';
 import useCryptoStore from '../stores/cryptoStore';
 
 const TradingSignals = () => {
-  const { selectedTicker, tradingSignals, actions } = useCryptoStore();
+  const { selectedTicker, signals, actions } = useCryptoStore();
   const [loading, setLoading] = useState(false);
   const [timeframe, setTimeframe] = useState('week');
+  const [dataSource, setDataSource] = useState('yfinance');
+  const [modelType, setModelType] = useState('arima');
   
   useEffect(() => {
     loadTradingSignals();
-  }, [selectedTicker]);
+  }, [selectedTicker, dataSource, modelType]);
   
   const loadTradingSignals = async () => {
     if (!selectedTicker) return;
     
     setLoading(true);
     try {
-      await actions.fetchTradingSignals(selectedTicker);
+      await actions.fetchSignals(selectedTicker, modelType, 7, dataSource);
     } catch (error) {
       console.error('Failed to load trading signals:', error);
     } finally {
@@ -24,34 +26,51 @@ const TradingSignals = () => {
     }
   };
   
-  const signals = tradingSignals[selectedTicker];
+  const signalData = signals[selectedTicker] || null;
+  
+  // Debug logging
+  React.useEffect(() => {
+    if (signalData) {
+      console.log('SignalData structure:', signalData);
+      console.log('SignalData.signals type:', typeof signalData.signals, signalData.signals);
+      console.log('SignalData.price_data type:', typeof signalData.price_data, signalData.price_data);
+    }
+  }, [signalData]);
   
   const prepareSignalChart = () => {
-    if (!signals?.price_data || !signals?.signals) return null;
+    if (!signalData?.price_data || !signalData?.signals || 
+        !Array.isArray(signalData.signals) || !Array.isArray(signalData.price_data)) return null;
     
     const buySignals = [];
     const sellSignals = [];
     
-    signals.signals.forEach((signal, idx) => {
-      if (signal === 1) {
-        buySignals.push({
-          x: new Date(signals.price_data[idx].date),
-          y: signals.price_data[idx].price
-        });
-      } else if (signal === -1) {
-        sellSignals.push({
-          x: new Date(signals.price_data[idx].date),
-          y: signals.price_data[idx].price
-        });
-      }
-    });
+    // Process signals - these are for future dates from raw_signals
+    if (signalData.raw_signals && signalData.price_data.length > 0) {
+      const lastPrice = signalData.price_data[signalData.price_data.length - 1].price;
+      
+      Object.entries(signalData.raw_signals).forEach(([date, signal]) => {
+        const signalPrice = lastPrice * (1 + Math.random() * 0.02 - 0.01); // Slight price variation
+        
+        if (signal === 'BUY') {
+          buySignals.push({
+            x: new Date(date),
+            y: signalPrice
+          });
+        } else if (signal === 'SELL') {
+          sellSignals.push({
+            x: new Date(date),
+            y: signalPrice
+          });
+        }
+      });
+    }
     
     return {
       series: [
         {
           name: 'Price',
           type: 'line',
-          data: signals.price_data.map(d => ({
+          data: signalData.price_data.map(d => ({
             x: new Date(d.date),
             y: d.price
           }))
@@ -102,7 +121,14 @@ const TradingSignals = () => {
     };
   };
   
-  const signalChart = prepareSignalChart();
+  const signalChart = React.useMemo(() => {
+    try {
+      return prepareSignalChart();
+    } catch (error) {
+      console.error('Error preparing signal chart:', error);
+      return null;
+    }
+  }, [signalData]);
   
   const getSignalIcon = (signal) => {
     if (signal === 'BUY') {
@@ -137,23 +163,88 @@ const TradingSignals = () => {
         📈 Trading Signals & Predictions - {selectedTicker}
       </h2>
       
-      {/* Timeframe Selector */}
-      <div className="flex gap-2 mb-6">
-        {['week', '2weeks', 'month'].map(tf => (
-          <button
-            key={tf}
-            onClick={() => setTimeframe(tf)}
-            className={`
-              px-4 py-2 rounded-md font-medium transition-colors
-              ${timeframe === tf
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }
-            `}
+      {/* Controls Section */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        {/* Data Source Selector */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Data Source
+          </label>
+          <select
+            value={dataSource}
+            onChange={(e) => setDataSource(e.target.value)}
+            className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
           >
-            {tf === 'week' ? '1 Week' : tf === '2weeks' ? '2 Weeks' : '1 Month'}
-          </button>
-        ))}
+            <option value="yfinance">Yahoo Finance</option>
+            <option value="binance">Binance</option>
+          </select>
+        </div>
+
+        {/* Model Type Selector */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Model Type
+          </label>
+          <select
+            value={modelType}
+            onChange={(e) => setModelType(e.target.value)}
+            className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option value="arima">ARIMA</option>
+            <option value="sarima">SARIMA</option>
+            <option value="random_forest">Random Forest</option>
+            <option value="xgboost">XGBoost</option>
+            <option value="lstm">LSTM</option>
+          </select>
+        </div>
+
+        {/* Timeframe Selector */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Timeframe
+          </label>
+          <div className="flex gap-2">
+            {['week', '2weeks', 'month'].map(tf => (
+              <button
+                key={tf}
+                onClick={() => setTimeframe(tf)}
+                className={`
+                  px-3 py-2 rounded-md text-sm font-medium transition-colors
+                  ${timeframe === tf
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }
+                `}
+              >
+                {tf === 'week' ? '1W' : tf === '2weeks' ? '2W' : '1M'}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Status Info */}
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-6">
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-blue-700">
+            <span className="font-medium">Active Configuration:</span> {dataSource === 'yfinance' ? 'Yahoo Finance' : 'Binance'} • {modelType.toUpperCase()} Model
+          </span>
+          <div className="flex items-center gap-3">
+            <span className="text-blue-600 text-xs">
+              {signalData?.from_cache ? '📊 Cached Data' : '🔄 Live Data'}
+            </span>
+            <button
+              onClick={loadTradingSignals}
+              disabled={loading}
+              className="text-blue-600 hover:text-blue-800 disabled:opacity-50 transition-colors"
+              title="Refresh signals"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
+          </div>
+        </div>
       </div>
       
       {loading && (
@@ -165,30 +256,30 @@ const TradingSignals = () => {
         </div>
       )}
       
-      {!loading && signals && (
+      {!loading && signalData && signalData.current_signal !== undefined && (
         <>
           {/* Current Recommendation */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             <div className={`
               p-4 rounded-lg border-2
-              ${signals.current_signal === 'BUY' ? 'border-green-500 bg-green-50' :
-                signals.current_signal === 'SELL' ? 'border-red-500 bg-red-50' :
+              ${signalData.current_signal === 'BUY' ? 'border-green-500 bg-green-50' :
+                signalData.current_signal === 'SELL' ? 'border-red-500 bg-red-50' :
                 'border-gray-300 bg-gray-50'}
             `}>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="font-semibold text-gray-700">Current Signal</h3>
-                {getSignalIcon(signals.current_signal)}
+                {getSignalIcon(signalData.current_signal)}
               </div>
               <p className={`text-2xl font-bold
-                ${signals.current_signal === 'BUY' ? 'text-green-600' :
-                  signals.current_signal === 'SELL' ? 'text-red-600' :
+                ${signalData.current_signal === 'BUY' ? 'text-green-600' :
+                  signalData.current_signal === 'SELL' ? 'text-red-600' :
                   'text-gray-600'}
               `}>
-                {signals.current_signal || 'HOLD'}
+                {signalData.current_signal || 'HOLD'}
               </p>
               <p className="text-sm text-gray-600 mt-1">
-                Confidence: <span className={`font-semibold ${getConfidenceColor(signals.confidence)}`}>
-                  {(signals.confidence * 100).toFixed(1)}%
+                Confidence: <span className={`font-semibold ${getConfidenceColor(signalData.confidence)}`}>
+                  {(signalData.confidence * 100).toFixed(1)}%
                 </span>
               </p>
             </div>
@@ -196,12 +287,12 @@ const TradingSignals = () => {
             <div className="p-4 rounded-lg border border-gray-200">
               <h3 className="font-semibold text-gray-700 mb-2">Expected Return</h3>
               <p className={`text-2xl font-bold ${
-                signals.expected_return > 0 ? 'text-green-600' : 'text-red-600'
+                signalData.expected_return > 0 ? 'text-green-600' : 'text-red-600'
               }`}>
-                {signals.expected_return > 0 ? '+' : ''}{signals.expected_return?.toFixed(2)}%
+                {signalData.expected_return > 0 ? '+' : ''}{signalData.expected_return?.toFixed(2)}%
               </p>
               <p className="text-sm text-gray-600 mt-1">
-                Target: ${signals.target_price?.toFixed(2)}
+                Target: ${signalData.target_price?.toFixed(2)}
               </p>
             </div>
             
@@ -211,19 +302,19 @@ const TradingSignals = () => {
                 <div className="flex-1 bg-gray-200 rounded-full h-3 mr-3">
                   <div
                     className={`h-3 rounded-full ${
-                      signals.risk_level === 'High' ? 'bg-red-500' :
-                      signals.risk_level === 'Medium' ? 'bg-yellow-500' :
+                      signalData.risk_level === 'High' ? 'bg-red-500' :
+                      signalData.risk_level === 'Medium' ? 'bg-yellow-500' :
                       'bg-green-500'
                     }`}
-                    style={{ width: `${signals.risk_score * 100}%` }}
+                    style={{ width: `${signalData.risk_score * 100}%` }}
                   />
                 </div>
                 <span className="font-semibold text-gray-700">
-                  {signals.risk_level}
+                  {signalData.risk_level}
                 </span>
               </div>
               <p className="text-sm text-gray-600 mt-1">
-                Stop Loss: ${signals.stop_loss?.toFixed(2)}
+                Stop Loss: ${signalData.stop_loss?.toFixed(2)}
               </p>
             </div>
           </div>
@@ -233,42 +324,42 @@ const TradingSignals = () => {
             <div className="p-3 bg-gray-50 rounded-lg">
               <p className="text-sm text-gray-600">RSI (14)</p>
               <p className="text-lg font-semibold">
-                {signals.indicators?.rsi?.toFixed(2) || 'N/A'}
+                {signalData.indicators?.rsi?.toFixed(2) || 'N/A'}
               </p>
               <p className="text-xs text-gray-500">
-                {signals.indicators?.rsi > 70 ? 'Overbought' :
-                 signals.indicators?.rsi < 30 ? 'Oversold' : 'Neutral'}
+                {signalData.indicators?.rsi > 70 ? 'Overbought' :
+                 signalData.indicators?.rsi < 30 ? 'Oversold' : 'Neutral'}
               </p>
             </div>
             
             <div className="p-3 bg-gray-50 rounded-lg">
               <p className="text-sm text-gray-600">MACD</p>
               <p className="text-lg font-semibold">
-                {signals.indicators?.macd?.signal > 0 ? 'Bullish' : 'Bearish'}
+                {signalData.indicators?.macd?.signal > 0 ? 'Bullish' : 'Bearish'}
               </p>
               <p className="text-xs text-gray-500">
-                Signal: {signals.indicators?.macd?.signal?.toFixed(4)}
+                Signal: {signalData.indicators?.macd?.signal?.toFixed(4)}
               </p>
             </div>
             
             <div className="p-3 bg-gray-50 rounded-lg">
               <p className="text-sm text-gray-600">Moving Avg</p>
               <p className="text-lg font-semibold">
-                {signals.indicators?.ma_trend || 'N/A'}
+                {signalData.indicators?.ma_trend || 'N/A'}
               </p>
               <p className="text-xs text-gray-500">
-                MA20: ${signals.indicators?.ma20?.toFixed(2)}
+                MA20: ${signalData.indicators?.ma20?.toFixed(2)}
               </p>
             </div>
             
             <div className="p-3 bg-gray-50 rounded-lg">
               <p className="text-sm text-gray-600">Volume</p>
               <p className="text-lg font-semibold">
-                {signals.indicators?.volume_trend || 'Normal'}
+                {signalData.indicators?.volume_trend || 'Normal'}
               </p>
               <p className="text-xs text-gray-500">
-                {signals.indicators?.volume_change > 0 ? '+' : ''}
-                {signals.indicators?.volume_change?.toFixed(1)}%
+                {signalData.indicators?.volume_change > 0 ? '+' : ''}
+                {signalData.indicators?.volume_change?.toFixed(1)}%
               </p>
             </div>
           </div>
@@ -309,7 +400,7 @@ const TradingSignals = () => {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {signals.predictions?.map((pred, idx) => (
+                {signalData.predictions?.map((pred, idx) => (
                   <tr key={idx}>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                       {pred.period}
@@ -340,6 +431,20 @@ const TradingSignals = () => {
             </table>
           </div>
         </>
+      )}
+      
+      {!loading && !signalData && (
+        <div className="flex items-center justify-center h-64">
+          <div className="text-center">
+            <div className="w-16 h-16 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </div>
+            <p className="text-gray-600">No trading signals available</p>
+            <p className="text-gray-500 text-sm">Select a ticker to generate signals</p>
+          </div>
+        </div>
       )}
     </div>
   );

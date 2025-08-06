@@ -80,27 +80,33 @@ def _create_lag_features(series: pd.Series, n_lags: int):
 
 def train_random_forest(ticker: str, series: pd.Series, n_lags: int = 5):
     ensure_model_dir()
+    
+    # Drop NaNs and check length
+    series = series.dropna()
+    if len(series) < 30:  # arbitrary minimum
+        raise ValueError("Not enough clean data for Random Forest")
+    
     df_lag = _create_lag_features(series, n_lags)
     X = df_lag.drop('y', axis=1).values
     y = df_lag['y'].values
     model = RandomForestRegressor(n_estimators=100)
     model.fit(X, y)
-    path = os.path.join(MODEL_DIR, f"{ticker}_rf.pkl")
-    with open(path, "wb") as f:
-        pickle.dump((model, n_lags), f)
     return model, n_lags
 
 
 def train_xgboost(ticker: str, series: pd.Series, n_lags: int = 5):
     ensure_model_dir()
+    
+    # Drop NaNs and check length
+    series = series.dropna()
+    if len(series) < 30:  # arbitrary minimum
+        raise ValueError("Not enough clean data for XGBoost")
+    
     df_lag = _create_lag_features(series, n_lags)
     X = df_lag.drop('y', axis=1).values
     y = df_lag['y'].values
     model = XGBRegressor(n_estimators=100)
     model.fit(X, y)
-    path = os.path.join(MODEL_DIR, f"{ticker}_xgb.pkl")
-    with open(path, "wb") as f:
-        pickle.dump((model, n_lags), f)
     return model, n_lags
 
 

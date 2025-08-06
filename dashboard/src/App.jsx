@@ -198,7 +198,6 @@ function App() {
   
   const initializeApp = async () => {
     try {
-      await actions.initWebSocket();
       await actions.fetchDatabaseSummary();
       await actions.fetchTickers();
       toast.success('✅ Platform initialized successfully!');

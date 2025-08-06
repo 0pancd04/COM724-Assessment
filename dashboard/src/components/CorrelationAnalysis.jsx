@@ -3,21 +3,23 @@ import ReactApexChart from 'react-apexcharts';
 import useCryptoStore from '../stores/cryptoStore';
 
 const CorrelationAnalysis = () => {
-  const { selectedTicker, correlationResults, actions } = useCryptoStore();
+  const { selectedTicker, correlationData, actions } = useCryptoStore();
   const [loading, setLoading] = useState(false);
   const [selectedTickers, setSelectedTickers] = useState(['BTC', 'ETH', 'ADA', 'DOT']);
   const [feature, setFeature] = useState('Close');
+  const [dataSource, setDataSource] = useState('yfinance');
   
   useEffect(() => {
     loadCorrelation();
-  }, [selectedTickers, feature]);
+  }, [selectedTickers, feature, dataSource]);
   
   const loadCorrelation = async () => {
     setLoading(true);
     try {
       await actions.fetchCorrelationAnalysis({
         tickers: selectedTickers.join(','),
-        feature: feature
+        feature: feature,
+        source: dataSource
       });
     } catch (error) {
       console.error('Failed to load correlation analysis:', error);
@@ -27,16 +29,36 @@ const CorrelationAnalysis = () => {
   };
   
   const prepareHeatmap = () => {
-    if (!correlationResults?.correlation_matrix) return null;
+    if (!correlationData?.report?.top_positive_pairs) return null;
     
-    const matrix = correlationResults.correlation_matrix;
-    const tickers = correlationResults.tickers || selectedTickers;
+    // Extract unique tickers from positive and negative pairs
+    const pairs = [
+      ...correlationData.report.top_positive_pairs,
+      ...correlationData.report.top_negative_pairs
+    ];
+    const uniqueTickers = Array.from(new Set(pairs.flatMap(p => p.pair)));
     
-    const series = tickers.map((ticker, i) => ({
+    // Create empty matrix
+    const matrix = {};
+    uniqueTickers.forEach(t1 => {
+      matrix[t1] = {};
+      uniqueTickers.forEach(t2 => {
+        matrix[t1][t2] = t1 === t2 ? 1 : null;
+      });
+    });
+    
+    // Fill in known correlations
+    pairs.forEach(({ pair, correlation }) => {
+      const [t1, t2] = pair;
+      matrix[t1][t2] = correlation;
+      matrix[t2][t1] = correlation; // Matrix is symmetric
+    });
+    
+    const series = uniqueTickers.map(ticker => ({
       name: ticker,
-      data: tickers.map((_, j) => ({
-        x: tickers[j],
-        y: matrix[i]?.[j] || 0
+      data: uniqueTickers.map(t2 => ({
+        x: t2,
+        y: matrix[ticker][t2] || 0
       }))
     }));
     
@@ -54,15 +76,35 @@ const CorrelationAnalysis = () => {
         },
         colors: ['#FF4560'],
         title: {
-          text: 'Correlation Matrix',
-          align: 'left'
+          text: `Correlation Matrix (${feature})`,
+          align: 'left',
+          style: {
+            fontSize: '16px',
+            fontWeight: 'bold'
+          }
         },
         xaxis: {
           type: 'category',
-          categories: tickers
+          categories: uniqueTickers,
+          labels: {
+            style: {
+              fontSize: '12px',
+              fontWeight: 'bold'
+            }
+          }
+        },
+        yaxis: {
+          labels: {
+            style: {
+              fontSize: '12px',
+              fontWeight: 'bold'
+            }
+          }
         },
         plotOptions: {
           heatmap: {
+            radius: 2,
+            enableShades: true,
             colorScale: {
               ranges: [
                 { from: -1, to: -0.5, color: '#FF4560', name: 'Strong Negative' },
@@ -71,6 +113,12 @@ const CorrelationAnalysis = () => {
                 { from: 0.5, to: 1, color: '#008FFB', name: 'Strong Positive' }
               ]
             }
+          }
+        },
+        tooltip: {
+          theme: 'dark',
+          y: {
+            formatter: (val) => val?.toFixed(4)
           }
         }
       }
@@ -101,7 +149,7 @@ const CorrelationAnalysis = () => {
       </h2>
       
       {/* Controls */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <div className="md:col-span-2">
           <label className="block text-sm font-medium text-gray-700 mb-1">
             Select Cryptocurrencies (comma-separated)
@@ -116,6 +164,19 @@ const CorrelationAnalysis = () => {
         </div>
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
+            Data Source
+          </label>
+          <select
+            className="w-full px-3 py-2 glass-dropdown"
+            value={dataSource}
+            onChange={(e) => setDataSource(e.target.value)}
+          >
+            <option value="yfinance">📈 Yahoo Finance</option>
+            <option value="binance">🟡 Binance</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
             Feature
           </label>
           <select
@@ -124,8 +185,10 @@ const CorrelationAnalysis = () => {
             onChange={(e) => setFeature(e.target.value)}
           >
             <option value="Close">Close Price</option>
+            <option value="Open">Open Price</option>
+            <option value="High">High Price</option>
+            <option value="Low">Low Price</option>
             <option value="Volume">Volume</option>
-            <option value="Returns">Returns</option>
           </select>
         </div>
       </div>
@@ -139,7 +202,7 @@ const CorrelationAnalysis = () => {
         </div>
       )}
       
-      {!loading && correlationResults && (
+      {!loading && correlationData && (
         <>
           {/* Heatmap */}
           {heatmapData && (
@@ -154,21 +217,21 @@ const CorrelationAnalysis = () => {
           )}
           
           {/* Top Correlations */}
-          {correlationResults.top_correlations && (
+          {correlationData?.report?.top_positive_pairs && (
             <div className="mb-6">
               <h3 className="text-lg font-semibold mb-3 text-gray-700">
-                Top Correlations for {selectedTicker}
+                Top Correlations ({feature})
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* Positive Correlations */}
                 <div>
                   <h4 className="font-medium text-green-600 mb-2">
-                    📈 Positive Correlations
+                    📈 Strongest Positive Correlations
                   </h4>
                   <div className="space-y-2">
-                    {correlationResults.top_correlations.positive?.map((item, idx) => (
+                    {correlationData.report.top_positive_pairs.map((item, idx) => (
                       <div key={idx} className="flex justify-between items-center p-3 bg-green-50 rounded">
-                        <span className="font-medium">{item.ticker}</span>
+                        <span className="font-medium">{item.pair.join(' → ')}</span>
                         <div className="text-right">
                           <span className={`text-lg font-bold ${getCorrelationColor(item.correlation)}`}>
                             {item.correlation.toFixed(3)}
@@ -182,15 +245,15 @@ const CorrelationAnalysis = () => {
                   </div>
                 </div>
                 
-                {/* Negative Correlations */}
+                {/* Negative/Lowest Correlations */}
                 <div>
                   <h4 className="font-medium text-red-600 mb-2">
-                    📉 Negative Correlations
+                    📉 Lowest Correlations
                   </h4>
                   <div className="space-y-2">
-                    {correlationResults.top_correlations.negative?.map((item, idx) => (
+                    {correlationData.report.top_negative_pairs.map((item, idx) => (
                       <div key={idx} className="flex justify-between items-center p-3 bg-red-50 rounded">
-                        <span className="font-medium">{item.ticker}</span>
+                        <span className="font-medium">{item.pair.join(' → ')}</span>
                         <div className="text-right">
                           <span className={`text-lg font-bold ${getCorrelationColor(item.correlation)}`}>
                             {item.correlation.toFixed(3)}
@@ -208,30 +271,30 @@ const CorrelationAnalysis = () => {
           )}
           
           {/* Statistics */}
-          {correlationResults.statistics && (
+          {correlationData?.report?.statistics && (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="p-3 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-600">Average Correlation</p>
-                <p className="text-xl font-bold">
-                  {correlationResults.statistics.avg_correlation?.toFixed(3)}
+              <div className="p-4 bg-white rounded-lg shadow-sm border border-gray-200">
+                <p className="text-sm text-gray-600 mb-1">Average Correlation</p>
+                <p className="text-2xl font-bold text-blue-600">
+                  {correlationData.report.statistics.avg_correlation?.toFixed(3)}
                 </p>
               </div>
-              <div className="p-3 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-600">Max Correlation</p>
-                <p className="text-xl font-bold">
-                  {correlationResults.statistics.max_correlation?.toFixed(3)}
+              <div className="p-4 bg-white rounded-lg shadow-sm border border-gray-200">
+                <p className="text-sm text-gray-600 mb-1">Max Correlation</p>
+                <p className="text-2xl font-bold text-green-600">
+                  {correlationData.report.statistics.max_correlation?.toFixed(3)}
                 </p>
               </div>
-              <div className="p-3 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-600">Min Correlation</p>
-                <p className="text-xl font-bold">
-                  {correlationResults.statistics.min_correlation?.toFixed(3)}
+              <div className="p-4 bg-white rounded-lg shadow-sm border border-gray-200">
+                <p className="text-sm text-gray-600 mb-1">Min Correlation</p>
+                <p className="text-2xl font-bold text-red-600">
+                  {correlationData.report.statistics.min_correlation?.toFixed(3)}
                 </p>
               </div>
-              <div className="p-3 bg-gray-50 rounded-lg">
-                <p className="text-sm text-gray-600">Std Deviation</p>
-                <p className="text-xl font-bold">
-                  {correlationResults.statistics.std_correlation?.toFixed(3)}
+              <div className="p-4 bg-white rounded-lg shadow-sm border border-gray-200">
+                <p className="text-sm text-gray-600 mb-1">Std Deviation</p>
+                <p className="text-2xl font-bold text-purple-600">
+                  {correlationData.report.statistics.std_correlation?.toFixed(3)}
                 </p>
               </div>
             </div>
