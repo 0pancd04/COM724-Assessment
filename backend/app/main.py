@@ -1500,29 +1500,53 @@ async def get_signals(
                 confidence = 0.8 if current_signal != "HOLD" else 0.6
                 expected_return = 0.03 if current_signal == "BUY" else -0.02 if current_signal == "SELL" else 0.0
                 
-                # Prepare price data for chart (last 30 days)
+                # Prepare price data for chart - adjust range based on periods
+                # Show more historical context for longer prediction periods
+                historical_days = max(30, periods * 2)  # At least 30 days, or 2x prediction period
                 price_data = []
-                chart_data = df_ticker.tail(30)
+                chart_data = df_ticker.tail(historical_days)
                 for idx, row in chart_data.iterrows():
                     price_data.append({
                         "date": idx.strftime("%Y-%m-%d"),
                         "price": float(row["Close"])
                     })
                 
-                # Convert raw_signals to signals array for chart
+                # Prepare cached signals list for processing
+                cached_signals_list = list(sorted(signals_out.items()))
+                
+                # Convert raw_signals to signals array for chart - match requested periods
                 signals_array = []
                 signal_mapping = {"BUY": 1, "SELL": -1, "HOLD": 0}
-                for date in sorted(signals_out.keys()):
-                    signals_array.append(signal_mapping.get(signals_out[date], 0))
                 
-                # Generate predictions from raw_signals
+                # Generate signals array for the requested number of periods
+                for i in range(periods):
+                    if i < len(cached_signals_list):
+                        signal = cached_signals_list[i][1]
+                    else:
+                        signal = "HOLD"
+                    signals_array.append(signal_mapping.get(signal, 0))
+                
+                # Generate predictions based on requested periods (not just cached signals)
                 predictions = []
-                for i, (date, signal) in enumerate(sorted(signals_out.items())):
+                
+                # Generate predictions for the requested number of periods
+                start_date = datetime.utcnow().date() + timedelta(days=1)
+                
+                for i in range(periods):
+                    pred_date = start_date + timedelta(days=i)
+                    pred_date_str = pred_date.strftime("%Y-%m-%d")
+                    
+                    # Use cached signal if available, otherwise default to HOLD
+                    if i < len(cached_signals_list):
+                        signal = cached_signals_list[i][1]
+                    else:
+                        signal = "HOLD"
+                    
                     predicted_price = current_price * (1 + (i * 0.01))  # Simple price progression
                     change_percent = ((predicted_price - current_price) / current_price) * 100
                     predictions.append({
                         "period": f"Day {i+1}",
-                        "date": date,
+                        "date": pred_date_str,
                         "price": predicted_price,
                         "change": change_percent,
                         "signal": signal,
@@ -1715,9 +1739,10 @@ async def get_signals(
         target_price = current_price * (1 + expected_return)
         stop_loss = current_price * 0.95 if current_signal == "BUY" else current_price * 1.05
         
-        # Prepare price data for chart
+        # Prepare price data for chart - adjust range based on periods
+        historical_days = max(30, periods * 2)  # At least 30 days, or 2x prediction period
         price_data = []
-        for idx, row in df_ticker.tail(30).iterrows():  # Last 30 days
+        for idx, row in df_ticker.tail(historical_days).iterrows():
             price_data.append({
                 "date": idx.strftime("%Y-%m-%d"),
                 "price": float(row["Close"])
@@ -1730,7 +1755,7 @@ async def get_signals(
         
         # Generate predictions (simplified forecast)
         try:
-            forecast_response = await get_forecast(ticker, model_type, 7, source)
+            forecast_response = await get_forecast(ticker, model_type, periods, source)
             forecast_data = forecast_response.body.decode() if hasattr(forecast_response, 'body') else '{}'
             predictions = []
             try:

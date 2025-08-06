@@ -3,9 +3,23 @@ import ReactApexChart from 'react-apexcharts';
 import useCryptoStore from '../stores/cryptoStore';
 
 const WhatIfScenarios = () => {
-  const { selectedTicker, whatifResults, actions } = useCryptoStore();
+  const selectedTicker = useCryptoStore(state => state.selectedTicker);
+  const whatIfResults = useCryptoStore(state => state.whatIfResults);
+  const actions = useCryptoStore(state => state.actions);
+  const loading = useCryptoStore(state => state.loading);
+  
+  // Debug: Log the whatIfResults directly
+  React.useEffect(() => {
+    console.log('WhatIfResults from selector:', whatIfResults);
+    console.log('WhatIfResults type:', typeof whatIfResults);
+    console.log('WhatIfResults keys:', whatIfResults ? Object.keys(whatIfResults) : 'null/undefined');
+  }, [whatIfResults]);
   const [activeScenario, setActiveScenario] = useState('price-change');
-  const [loading, setLoading] = useState(false);
+  
+  // Debug: Log store state changes
+  React.useEffect(() => {
+    console.log('Store whatIfResults changed:', whatIfResults);
+  }, [whatIfResults]);
   
   // Price Change Scenario State
   const [priceChangeParams, setPriceChangeParams] = useState({
@@ -42,15 +56,14 @@ const WhatIfScenarios = () => {
   });
   
   const runScenario = async () => {
-    setLoading(true);
     try {
       let params = {};
       switch (activeScenario) {
         case 'price-change':
           params = {
             ...priceChangeParams,
-            target_prices: priceChangeParams.target_prices.split(',').map(p => parseFloat(p.trim())),
-            quantities: priceChangeParams.quantities.split(',').map(q => parseFloat(q.trim()))
+            target_prices: priceChangeParams.target_prices, // Keep as comma-separated string
+            quantities: priceChangeParams.quantities // Keep as comma-separated string
           };
           break;
         case 'trading-strategy':
@@ -59,13 +72,8 @@ const WhatIfScenarios = () => {
         case 'portfolio':
           params = {
             ...portfolioParams,
-            tickers: portfolioParams.tickers.split(',').map(t => t.trim()),
-            allocations: Object.fromEntries(
-              portfolioParams.tickers.split(',').map((t, i) => [
-                t.trim(),
-                parseFloat(portfolioParams.allocations.split(',')[i]) / 100
-              ])
-            )
+            tickers: portfolioParams.tickers, // Keep as comma-separated string
+            allocations: portfolioParams.allocations // Keep as comma-separated string
           };
           break;
         case 'dca':
@@ -73,30 +81,46 @@ const WhatIfScenarios = () => {
           break;
       }
       
+      console.log('Component: Calling runWhatIfScenario with:', { activeScenario, params });
       await actions.runWhatIfScenario(activeScenario, params);
     } catch (error) {
       console.error('Failed to run scenario:', error);
-    } finally {
-      setLoading(false);
+      // Show error message to user
+      alert('Failed to run scenario analysis: ' + error.message);
     }
   };
   
-  const results = whatifResults[activeScenario];
+  const results = whatIfResults?.[activeScenario] || null;
+  
+  // Debug logging
+  React.useEffect(() => {
+    console.log('Component Debug:', {
+      activeScenario,
+      whatIfResults,
+      'whatIfResults[activeScenario]': whatIfResults?.[activeScenario],
+      results,
+      'results exists': !!results,
+      'results.scenarios': results?.scenarios,
+      'results.summary': results?.summary,
+      loading
+    });
+  }, [results, activeScenario, whatIfResults, loading]);
   
   const prepareChartData = () => {
     if (!results) return null;
     
     switch (activeScenario) {
       case 'price-change':
+        if (!results.scenarios || !Array.isArray(results.scenarios)) return null;
         return {
           series: [{
             name: 'P&L',
-            data: results.scenarios?.map(s => s.pnl) || []
+            data: results.scenarios.map(s => s.profit_loss || s.pnl || 0)
           }],
           options: {
             chart: { type: 'bar', height: 350 },
             xaxis: {
-              categories: results.scenarios?.map(s => `$${s.target_price}`) || [],
+              categories: results.scenarios.map(s => `$${s.target_price || 0}`),
               title: { text: 'Target Price' }
             },
             yaxis: { title: { text: 'Profit/Loss ($)' } },
@@ -106,21 +130,21 @@ const WhatIfScenarios = () => {
         };
         
       case 'dca':
-        if (!results.accumulation_data) return null;
+        if (!results.accumulation_data || !Array.isArray(results.accumulation_data)) return null;
         return {
           series: [
             {
               name: 'Total Investment',
               data: results.accumulation_data.map(d => ({
                 x: new Date(d.date),
-                y: d.total_invested
+                y: d.total_invested || 0
               }))
             },
             {
               name: 'Portfolio Value',
               data: results.accumulation_data.map(d => ({
                 x: new Date(d.date),
-                y: d.portfolio_value
+                y: d.portfolio_value || 0
               }))
             }
           ],
@@ -137,8 +161,9 @@ const WhatIfScenarios = () => {
         };
         
       case 'portfolio':
+        if (!results.allocation_percentages || !Array.isArray(results.allocation_percentages)) return null;
         return {
-          series: results.allocation_percentages || [],
+          series: results.allocation_percentages,
           options: {
             chart: { type: 'donut', height: 350 },
             labels: results.tickers || [],
@@ -394,7 +419,32 @@ const WhatIfScenarios = () => {
         </button>
       </div>
       
+      {/* Loading State */}
+      {loading && (
+        <div className="text-center py-12">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <h3 className="text-xl font-semibold text-gray-700 mb-2">
+            Analyzing Scenarios...
+          </h3>
+          <p className="text-gray-500">
+            Please wait while we process your what-if analysis
+          </p>
+        </div>
+      )}
+      
       {/* Results Display */}
+      {!results && !loading && (
+        <div className="text-center py-12">
+          <div className="text-6xl mb-4">🔮</div>
+          <h3 className="text-xl font-semibold text-gray-700 mb-2">
+            No Analysis Results Yet
+          </h3>
+          <p className="text-gray-500 mb-4">
+            Configure your parameters above and click "Run Scenario Analysis" to see results
+          </p>
+        </div>
+      )}
+      
       {results && (
         <>
           {/* Summary Cards */}
@@ -428,7 +478,7 @@ const WhatIfScenarios = () => {
           )}
           
           {/* Detailed Results Table */}
-          {results.scenarios && (
+          {results.scenarios && Array.isArray(results.scenarios) && results.scenarios.length > 0 && (
             <div className="overflow-x-auto">
               <h3 className="text-lg font-semibold mb-3 text-gray-700">Scenario Details</h3>
               <table className="min-w-full divide-y divide-gray-200">
@@ -461,7 +511,7 @@ const WhatIfScenarios = () => {
           )}
           
           {/* Recommendations */}
-          {results.recommendations && (
+          {results.recommendations && Array.isArray(results.recommendations) && results.recommendations.length > 0 && (
             <div className="mt-6 p-4 bg-blue-50 border-l-4 border-blue-500 rounded">
               <h3 className="font-semibold text-blue-900 mb-2">Recommendations</h3>
               <ul className="list-disc list-inside text-blue-700 space-y-1">

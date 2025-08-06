@@ -46,8 +46,8 @@ export const API_ENDPOINTS = {
   WHATIF: {
     PRICE_CHANGE: `${API_BASE_URL}/whatif/price-change`,
     TRADING_STRATEGY: `${API_BASE_URL}/whatif/trading-strategy`,
-    PORTFOLIO: `${API_BASE_URL}/whatif/portfolio-allocation`,
-    DCA: `${API_BASE_URL}/whatif/dca-investment`,
+    PORTFOLIO: `${API_BASE_URL}/whatif/portfolio`,
+    DCA: `${API_BASE_URL}/whatif/dca`,
   },
   
   // WebSocket

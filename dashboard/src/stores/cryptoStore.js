@@ -253,16 +253,47 @@ const useCryptoStore = create((set, get) => ({
     runWhatIfScenario: async (type, params) => {
       try {
         set({ loading: true });
-        const endpoint = API_ENDPOINTS.WHATIF[type.toUpperCase().replace('-', '_')];
-        const response = await axios.get(endpoint, { params });
+        const endpointKey = type.toUpperCase().replace('-', '_');
+        const endpoint = API_ENDPOINTS.WHATIF[endpointKey];
+        console.log('WhatIf API Call:', { type, endpointKey, endpoint, params, availableEndpoints: Object.keys(API_ENDPOINTS.WHATIF) });
+        
+        if (!endpoint) {
+          throw new Error(`No endpoint found for scenario type: ${type} (key: ${endpointKey})`);
+        }
+        
+        const response = await axios.post(endpoint, null, { params });
+        console.log('WhatIf API Response:', response.data);
         
         if (response.data) {
+          // Process the response to add summary data
+          const processedData = { ...response.data };
+          
+          // Create summary from best/worst scenarios or calculate from scenarios
+          if (type === 'price-change' && response.data.scenarios) {
+            const scenarios = response.data.scenarios;
+            const profits = scenarios.map(s => s.profit_loss || 0);
+            const maxProfit = Math.max(...profits);
+            const minProfit = Math.min(...profits);
+            const avgProfit = profits.reduce((a, b) => a + b, 0) / profits.length;
+            
+            processedData.summary = {
+              'Max Profit': maxProfit,
+              'Min Profit': minProfit, 
+              'Avg Profit': avgProfit,
+              'Total Scenarios': scenarios.length,
+              'Best ROI': response.data.best_scenario?.profit_loss_pct || 0,
+              'Worst ROI': response.data.worst_scenario?.profit_loss_pct || 0
+            };
+          }
+          
+          console.log('Storing processed data:', { type, processedData });
           set(state => ({
             whatIfResults: {
               ...state.whatIfResults,
-              [type]: response.data
+              [type]: processedData
             }
           }));
+          console.log('Store updated, current whatIfResults:', get().whatIfResults);
         }
       } catch (error) {
         console.error('Failed to run what-if scenario:', error);

@@ -11,14 +11,25 @@ const TradingSignals = () => {
   
   useEffect(() => {
     loadTradingSignals();
-  }, [selectedTicker, dataSource, modelType]);
+  }, [selectedTicker, dataSource, modelType, timeframe]);
+  
+  // Convert timeframe to periods
+  const getPeriods = (timeframe) => {
+    switch(timeframe) {
+      case 'week': return 7;
+      case '2weeks': return 14; 
+      case 'month': return 30;
+      default: return 7;
+    }
+  };
   
   const loadTradingSignals = async () => {
     if (!selectedTicker) return;
     
     setLoading(true);
     try {
-      await actions.fetchSignals(selectedTicker, modelType, 7, dataSource);
+      const periods = getPeriods(timeframe);
+      await actions.fetchSignals(selectedTicker, modelType, periods, dataSource);
     } catch (error) {
       console.error('Failed to load trading signals:', error);
     } finally {
